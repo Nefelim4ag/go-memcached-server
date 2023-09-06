@@ -32,3 +32,9 @@ func(s *SharedStore) Get(key string) (any, bool) {
 	value, ok := s.internal[key]
 	return value, ok
 }
+
+func (s *SharedStore) Delete(key string) {
+	s.Lock()
+	defer s.Unlock()
+	delete(s.internal, key)
+}

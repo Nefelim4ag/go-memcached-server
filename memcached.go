@@ -177,6 +177,33 @@ func HandleCommand(request string, client *bufio.ReadWriter) error {
 
 		client.Writer.Write([]byte("END\r\n"))
 
+	case "delete": //delete <key> [noreply]\r\n
+		key := args[0]
+		_, exist := store.Get(key)
+		if exist{
+			store.Delete(key)
+			client.Writer.Write([]byte("DELETED\r\n"))
+		} else {
+			client.Writer.Write([]byte("NOT_FOUND\r\n"))
+		}
+
+	case "touch": //touch <key> <exptime> [noreply]\r\n
+		key := args[0]
+		exptime, err := strconv.ParseUint(args[1], 10, 32)
+		if err != nil {
+			return err
+		}
+
+		_v, exist := store.Get(key)
+		v := _v.(memcachedEntry)
+		if exptime > 0 && exist {
+			v.exptime = uint32(exptime)
+			store.Set(key, v)
+			client.Writer.Write([]byte("TOUCHED\r\n"))
+		} else {
+			client.Writer.Write([]byte("NOT_FOUND\r\n"))
+		}
+
 	case "stats":
 		switch args[0] {
 			case "items":
