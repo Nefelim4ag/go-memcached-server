@@ -1,2 +1,3 @@
 # go-memcached-server
-Educational proposes Memcached server &amp; protocol compatible implementation
+
+The Memcached server is written in Go for education goals a protocol-compatible implementation
