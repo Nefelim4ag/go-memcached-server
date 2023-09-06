@@ -2,51 +2,48 @@ package main
 
 import (
 	"bufio"
+	"fmt"
 	"io"
 	"log"
+	"nefelim4ag/go-memcached-server/tcpserver"
 	"net"
+	"os"
+	"os/signal"
 	"strings"
-	"sync"
+	"syscall"
 )
 
-type client struct {
-	wg *sync.WaitGroup
-	connection net.Conn
-}
-
 func main() {
-	wg := &sync.WaitGroup{}
-	listener, err := net.Listen("tcp", "0.0.0.0:11211")
-	if err != nil {
-		log.Fatalln(err)
-	}
-	defer listener.Close()
+	// Wait for a SIGINT or SIGTERM signal to gracefully shut down the server
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
-	for {
-		con, err := listener.Accept()
-		if err != nil {
-			log.Println(err)
-			continue
-		}
-		obj := client{
-			wg: wg,
-            connection: con,
-		}
+	srv, err := tcpserver.ListenAndServe(":11211", 32)
+	if err!= nil {
+        log.Fatal(err)
+    }
 
-		// If you want, you can increment a counter here and inject to handleClientRequest below as client identifier
-		wg.Add(1)
-		go handleClientRequest(&obj)
+	acceptThreads := 4
+	for acceptThreads > 0 {
+		acceptThreads -= 1
+		go srv.AcceptConnections(HandleConnection)
 	}
 
-	wg.Wait()
+	<-sigChan
+	fmt.Println("Shutting down server...")
+	srv.Stop()
+	fmt.Println("Server stopped.")
 }
 
-func handleClientRequest(obj *client) {
-	defer obj.wg.Done()
-	defer obj.connection.Close()
+func HandleConnection(conn net.Conn, err error) {
+	if err!= nil {
+        log.Println(err)
+        return
+    }
 
-	clientReader := bufio.NewReader(obj.connection)
+	defer conn.Close()
 
+	clientReader := bufio.NewReader(conn)
 	for {
 		// Waiting for the client request
 		clientRequest, err := clientReader.ReadString('\n')
@@ -70,7 +67,7 @@ func handleClientRequest(obj *client) {
 		}
 
 		// Responding to the client request
-		if _, err = obj.connection.Write([]byte("GOT IT!\n")); err != nil {
+		if _, err = conn.Write([]byte("recieved\n")); err != nil {
 			log.Printf("failed to respond to client: %v\n", err)
 		}
 	}
