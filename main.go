@@ -59,8 +59,7 @@ func HandleConnection(conn net.Conn, err error) {
 		switch err {
 		case nil:
 			clientRequest := strings.TrimSpace(clientRequest)
-			log.Println(clientRequest)
-			resp, err := HandleCommand(clientRequest, clientReader)
+			resp, err := HandleCommand(clientRequest, clientReader, conn)
 			if err!= nil {
                 log.Println(clientRequest, err)
 				return
@@ -91,7 +90,7 @@ type memcachedEntry struct {
 	value []byte
 }
 
-func HandleCommand(request string, reader *bufio.Reader) (string, error) {
+func HandleCommand(request string, reader *bufio.Reader, conn net.Conn) (string, error) {
 	request_parsed := strings.Split(request, " ")
 	command := request_parsed[0]
 	args := request_parsed[1:]
@@ -151,7 +150,21 @@ func HandleCommand(request string, reader *bufio.Reader) (string, error) {
 
 		// - "NOT_FOUND\r\n" to indicate that the item you are trying to store
 		// with a "cas" command did not exist.
-
+	case "get", "gets":
+		for _, v := range args {
+			value, exist := store.Get(v)
+			if !exist{
+				continue
+			}
+			var entry memcachedEntry = value.(memcachedEntry)
+			// VALUE <key> <flags> <bytes> [<cas unique>]\r\n
+			// <data block>\r\n
+			resp := fmt.Sprintf("VALUE %s %d %d\r\n", entry.key, entry.flags, entry.len)
+			conn.Write([]byte(resp))
+			conn.Write(entry.value)
+			conn.Write([]byte("\r\n"))
+		}
+		return "END\r\n", nil
 
 	case "stats":
 		switch args[0] {

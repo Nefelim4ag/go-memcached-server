@@ -26,9 +26,9 @@ func (s *SharedStore) Set(key string, value any) {
 	s.internal[key] = value
 }
 
-func(s *SharedStore) Get(key string) any {
+func(s *SharedStore) Get(key string) (any, bool) {
 	s.RLock()
 	defer s.RUnlock()
-
-	return s.internal[key]
+	value, ok := s.internal[key]
+	return value, ok
 }
