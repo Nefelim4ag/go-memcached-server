@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -23,6 +24,13 @@ var (
 )
 
 func main() {
+	_memstore_size := flag.Uint64("m", 512, "items memory in megabytes, default is 512")
+	_memstore_item_size := flag.Uint64("I", 1024*1024, "max item sizem, default is 1m")
+	flag.Parse()
+
+	memstore_size := uint64(*_memstore_size) * 1024 * 1024
+	memstore_item_size := uint64(*_memstore_item_size)
+
 	// Wait for a SIGINT or SIGTERM signal to gracefully shut down the server
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
@@ -31,7 +39,7 @@ func main() {
 		log.Println(http.ListenAndServe("127.0.0.1:6060", nil))
 	}()
 
-	store = memstore.NewSharedStore()
+	store = memstore.NewSharedStore(memstore_size, memstore_item_size)
 
 	srv, err := tcpserver.ListenAndServe(":11211", 32)
 	if err!= nil {
@@ -73,6 +81,7 @@ func HandleConnection(conn net.Conn, err error) {
 			if err!= nil {
                 log.Println(clientRequest, err)
 				client.Writer.Write([]byte("ERROR\r\n"))
+				client.Writer.Flush()
 				return
             }
 		case io.EOF:
@@ -142,7 +151,11 @@ func HandleCommand(request string, client *bufio.ReadWriter) error {
 		// Read message last \r\n possibly
 		client.Reader.ReadString('\n')
 
-		store.Set(entry.key, entry)
+		err = store.Set(entry.key, entry, entry.len)
+		if err!= nil {
+			client.Writer.Write([]byte(fmt.Sprintf("%s\r\n", err)))
+            return err
+        }
 
 		client.Writer.Write([]byte("STORED\r\n"))
 
@@ -198,7 +211,7 @@ func HandleCommand(request string, client *bufio.ReadWriter) error {
 		v := _v.(memcachedEntry)
 		if exptime > 0 && exist {
 			v.exptime = uint32(exptime)
-			store.Set(key, v)
+			store.Set(key, v, v.len)
 			client.Writer.Write([]byte("TOUCHED\r\n"))
 		} else {
 			client.Writer.Write([]byte("NOT_FOUND\r\n"))
