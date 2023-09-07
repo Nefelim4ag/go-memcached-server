@@ -14,6 +14,7 @@ type SharedStore struct {
 	size_limit uint64
 	item_size_limit uint64
 	current_size uint64
+	flush time.Time
 	internal map[string] entry
 }
 
@@ -39,12 +40,10 @@ func (a byATime) Less(i, j int) bool {
 }
 func (a byATime) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
 
-func NewSharedStore(size_limit uint64, item_size_limit uint64) *SharedStore {
+func NewSharedStore() *SharedStore {
 	return &SharedStore{
-		size_limit: size_limit,
-		item_size_limit: item_size_limit,
-		current_size: 0,
-		internal: make(map[string] entry, size_limit/item_size_limit),
+		flush: time.Now(),
+		internal: make(map[string] entry),
 	}
 }
 
@@ -52,10 +51,12 @@ type Manager interface {
 	Set(key string, value struct{})
 	Get(key string) struct{}
 	Delete(key string)
+	SetMemoryLimit(limit uint64)
+	SetItemSizeLimit(limit uint64)
 }
 
 func (s *SharedStore) Set(key string, value any, size uint64) error {
-	if s.item_size_limit < size {
+	if s.item_size_limit > 0 && s.item_size_limit < size {
 		return fmt.Errorf("SERVER_ERROR object too large for cache")
 	}
 	s.Lock()
@@ -74,7 +75,7 @@ func (s *SharedStore) Set(key string, value any, size uint64) error {
 
 	s.current_size += size
 
-	if s.current_size > s.size_limit {
+	if s.size_limit > 0 && s.current_size > s.size_limit {
 		go s.LRU()
     }
 
@@ -123,6 +124,9 @@ func(s *SharedStore) Get(key string) (any, bool) {
 	s.RLock()
 	defer s.RUnlock()
 	value, ok := s.internal[key]
+	if s.flush.After(value.atime) {
+		ok = false
+	}
 	return value.item, ok
 }
 
@@ -138,4 +142,16 @@ func (s *SharedStore) Delete(key string) {
 	s.Lock()
 	defer s.Unlock()
 	s.deleteNoLock(key)
+}
+
+func (s *SharedStore) Flush() {
+    s.flush = time.Now()
+}
+
+func (s *SharedStore) SetMemoryLimit(limit uint64) {
+	s.size_limit = limit
+}
+
+func (s *SharedStore) SetItemSizeLimit(limit uint64) {
+	s.item_size_limit = limit
 }
