@@ -85,7 +85,7 @@ func HandleConnection(conn net.Conn, err error) {
 				return
             }
 		case io.EOF:
-			log.Println("client closed connection")
+			log.Printf("client %s closed connection", conn.RemoteAddr())
 			return
 		default:
 			log.Printf("error: %v\n", err)
@@ -216,6 +216,50 @@ func HandleCommand(request string, client *bufio.ReadWriter) error {
 		} else {
 			client.Writer.Write([]byte("NOT_FOUND\r\n"))
 		}
+	// incr|decr <key> <value> [noreply]\r\n
+	case "incr", "decr":
+		key := args[0]
+		change, err := strconv.ParseUint(args[1], 10, 64)
+		if err!= nil {
+			client.Writer.Write([]byte(fmt.Sprintf("CLIENT_ERROR %s\r\n", err)))
+            return err
+        }
+
+		_v, exist := store.Get(key)
+		if !exist {
+			client.Writer.Write([]byte("NOT_FOUND\r\n"))
+            return nil
+        }
+		v := _v.(memcachedEntry)
+		old_value, err := strconv.ParseUint(string(v.value), 10, 64)
+		if err!= nil {
+			client.Writer.Write([]byte(fmt.Sprintf("SERVER_ERROR %s\r\n", err)))
+            return err
+        }
+
+		const MaxUint = ^uint64(0)
+		const MinUint = uint64(0)
+		new_value := uint64(0)
+		if command == "incr" {
+            if MaxUint - old_value < change {
+				new_value = MaxUint
+			} else {
+				new_value = old_value + change
+			}
+        } else {
+			if MinUint + old_value < change {
+				new_value = MinUint
+			} else {
+				new_value = old_value - change
+			}
+        }
+
+		v.value = []byte(fmt.Sprintf("%d", new_value))
+		v.len = uint64(len(v.value))
+		store.Set(key, v, v.len)
+
+		client.Writer.Write([]byte(fmt.Sprintf("%d\r\n", new_value)))
+		client.Writer.Write([]byte("END\r\n"))
 
 	case "stats":
 		switch args[0] {
