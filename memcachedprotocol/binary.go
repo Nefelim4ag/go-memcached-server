@@ -120,7 +120,7 @@ func CommandBinary(magic byte, client *bufio.ReadWriter, store *memstore.SharedS
     }
 
     switch request.opcode {
-    case Set:
+    case Set, SetQ:
         flags := make([]byte, 4)
         exptime := make([]byte, 4)
         key := make([]byte, request.keyLen)
@@ -165,8 +165,12 @@ func CommandBinary(magic byte, client *bufio.ReadWriter, store *memstore.SharedS
         }
         response.cas = entry.cas
 
+        if request.opcode == SetQ {
+            return nil
+        }
+
         return Response(client.Writer, &response)
-    case Get:
+    case Get, GetQ:
         key := make([]byte, request.keyLen)
         _, err = client.Reader.Read(key)
         if err != nil {
@@ -177,6 +181,9 @@ func CommandBinary(magic byte, client *bufio.ReadWriter, store *memstore.SharedS
 
         _v, ok := store.Get(string(key[:]))
         if !ok {
+            if request.opcode == GetQ {
+                return nil
+            }
             response.status = NEnt
             return Response(client.Writer, &response)
         }
