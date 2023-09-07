@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"nefelim4ag/go-memcached-server/memstore"
+	"time"
 	"unsafe"
 )
 
@@ -96,6 +97,7 @@ const (
 
 // Magic
 type Magic byte
+
 const (
     RequestMagic  Magic = 0x80
     ResponseMagic Magic = 0x81
@@ -107,33 +109,76 @@ func CommandBinary(magic byte, client *bufio.ReadWriter, store *memstore.SharedS
     if err != nil {
         return err
     }
-    opcode := raw_request[0]
-    keyLen := raw_request[1:3]
-    raw_request = raw_request[3:] // Shift by 3 bytes
+    request := DecodeRequestHeader(Magic(magic), raw_request)
 
-    request := RequestHeader{
-        magic:     Magic(magic),
-        opcode:    OpcodeType(opcode),
-        keyLen:    binary.LittleEndian.Uint16(keyLen),
-        extrasLen: raw_request[0],
-        dataType:  raw_request[1],
-        vBucketId: binary.LittleEndian.Uint16(raw_request[2:4]),
-        totalBody: binary.LittleEndian.Uint32(raw_request[4:8]),
-        opaque:    binary.LittleEndian.Uint32(raw_request[8:12]),
-        cas:       binary.LittleEndian.Uint64(raw_request[12:20]),
+    // By protocol opcode & opaque same as client request
+    response := ResponseHeader{
+        magic:  ResponseMagic,
+        opcode: request.opcode,
+        status: NoErr,
+        opaque: request.opaque,
     }
 
     switch request.opcode {
+    case Set:
+        flags := make([]byte, 4)
+        exptime := make([]byte, 4)
+        key := make([]byte, request.keyLen)
+        bodyLen := request.totalBody - uint32(request.keyLen) - uint32(request.extrasLen)
+        value := make([]byte, bodyLen)
+        err_s := make([]error, 4)
+        _, err_s[0] = client.Reader.Read(flags)
+        _, err_s[1] = client.Reader.Read(exptime)
+        _, err_s[2] = client.Reader.Read(key)
+        _, err_s[3] = client.Reader.Read(value)
+        for _, err := range err_s {
+            if err != nil {
+                response.status = EInter
+                Response(client.Writer, &response)
+                return err
+            }
+        }
+        fmt.Printf("Flags:  0x%08x\n", flags)
+        fmt.Printf("ExpTim: 0x%08x\n", exptime)
+        fmt.Printf("Key:    %s\n\n", key)
+
+        entry := memcachedEntry{
+            key: string(key[:]),
+            flags: binary.BigEndian.Uint32(flags),
+            exptime: binary.BigEndian.Uint32(exptime),
+            len: bodyLen,
+            cas: uint64(time.Now().UnixNano()),
+            value: value,
+        }
+
+        if request.cas != 0 {
+            v, ok := store.Get(entry.key)
+            if ok && request.cas != v.(memcachedEntry).cas {
+                response.status = Exist
+                Response(client.Writer, &response)
+                return nil
+            }
+        }
+
+        err = store.Set(entry.key, entry, uint64(entry.len))
+        if err != nil {
+            return err
+        }
+        response.cas = entry.cas
+
+        Response(client.Writer, &response)
+
+        return nil
     case Quit:
-        Response(client.Writer, request.opcode, NoErr, request.opaque)
+        Response(client.Writer, &response)
         return fmt.Errorf("Quit")
     case QuitQ:
         return fmt.Errorf("QuitQ")
     case NoOp:
-        Response(client.Writer, request.opcode, NoErr, request.opaque)
+        Response(client.Writer, &response)
     }
 
-    return fmt.Errorf("Not implemented")
+    return fmt.Errorf("not implemented")
 }
 
 type RequestHeader struct {
@@ -144,7 +189,7 @@ type RequestHeader struct {
     dataType  uint8
     vBucketId uint16
     totalBody uint32
-    opaque    uint32
+    opaque    [4]byte
     cas       uint64
 }
 
@@ -156,69 +201,12 @@ type ResponseHeader struct {
     dataType  uint8
     status    ResponseStatus
     totalBody uint32
-    opaque    uint32
+    opaque    [4]byte
     cas       uint64
 }
 
-func Response(w *bufio.Writer, opcode OpcodeType, status ResponseStatus, opaque uint32) error {
-    rsp := ResponseHeader{
-        magic:  ResponseMagic,
-        opcode: opcode,
-        status: status,
-        opaque: opaque,
-    }
-
-    rsp_bytes := make([]byte, unsafe.Sizeof(ResponseHeader{}))
-    rsp_bytes[0] = byte(rsp.magic)
-    rsp_bytes[1] = byte(rsp.opcode)
-    fmt.Printf("0x%x\n", rsp_bytes[0])
-    fmt.Printf("0x%x\n", rsp_bytes[1])
-
-    keyLen_bytes := make([]byte, 2)
-    binary.LittleEndian.PutUint16(keyLen_bytes, uint16(rsp.keyLen))
-    rsp_bytes[2] = keyLen_bytes[0]
-    rsp_bytes[3] = keyLen_bytes[1]
-    fmt.Printf("0x%x%x\n", rsp_bytes[2], rsp_bytes[3])
-
-    rsp_bytes[4] = rsp.extrasLen
-    rsp_bytes[5] = rsp.dataType
-    fmt.Printf("0x%x\n", rsp_bytes[4])
-    fmt.Printf("0x%x\n", rsp_bytes[5])
-
-    status_bytes := make([]byte, 2)
-    binary.LittleEndian.PutUint16(status_bytes, uint16(rsp.status))
-    rsp_bytes[6] = status_bytes[0]
-    rsp_bytes[7] = status_bytes[1]
-    fmt.Printf("0x%x%x\n", rsp_bytes[6], rsp_bytes[7])
-
-    totalBody_bytes := make([]byte, 4)
-    binary.LittleEndian.PutUint32(totalBody_bytes, uint32(rsp.totalBody))
-    rsp_bytes[8] = totalBody_bytes[0]
-    rsp_bytes[9] = totalBody_bytes[1]
-    rsp_bytes[10] = totalBody_bytes[2]
-    rsp_bytes[11] = totalBody_bytes[3]
-    fmt.Printf("0x%x%x%x%x\n", rsp_bytes[8], rsp_bytes[9], rsp_bytes[10], rsp_bytes[11])
-
-    opaque_bytes := make([]byte, 4)
-    binary.LittleEndian.PutUint32(opaque_bytes, uint32(rsp.opaque))
-    rsp_bytes[12] = opaque_bytes[0]
-    rsp_bytes[13] = opaque_bytes[1]
-    rsp_bytes[14] = opaque_bytes[2]
-    rsp_bytes[15] = opaque_bytes[3]
-    fmt.Printf("0x%x%x%x%x\n", rsp_bytes[12], rsp_bytes[13], rsp_bytes[14], rsp_bytes[15])
-
-    cas_bytes := make([]byte, 8)
-    binary.LittleEndian.PutUint64(cas_bytes, uint64(rsp.cas))
-    rsp_bytes[16] = cas_bytes[0]
-    rsp_bytes[17] = cas_bytes[1]
-    rsp_bytes[18] = cas_bytes[2]
-    rsp_bytes[19] = cas_bytes[3]
-    rsp_bytes[20] = cas_bytes[4]
-    rsp_bytes[21] = cas_bytes[5]
-    rsp_bytes[22] = cas_bytes[6]
-    rsp_bytes[23] = cas_bytes[7]
-    fmt.Printf("0x%x%x%x%x", rsp_bytes[16], rsp_bytes[17], rsp_bytes[18], rsp_bytes[19])
-    fmt.Printf("%x%x%x%x\n", rsp_bytes[20], rsp_bytes[21], rsp_bytes[22], rsp_bytes[23])
+func Response(w *bufio.Writer, rsp *ResponseHeader) error {
+    rsp_bytes := rsp.GetBytes()
 
     _, err := w.Write(rsp_bytes)
     if err != nil {
@@ -227,4 +215,90 @@ func Response(w *bufio.Writer, opcode OpcodeType, status ResponseStatus, opaque 
     w.Flush()
 
     return nil
+}
+
+func DecodeRequestHeader(magic Magic, request_bytes []byte) RequestHeader {
+    opcode := request_bytes[0]
+    keyLen := request_bytes[1:3]
+    request_bytes = request_bytes[3:] // Shift by 3 bytes
+
+    request := RequestHeader{
+        magic:     Magic(magic),
+        opcode:    OpcodeType(opcode),
+        keyLen:    binary.BigEndian.Uint16(keyLen),
+        extrasLen: request_bytes[0],
+        dataType:  request_bytes[1],
+        vBucketId: binary.BigEndian.Uint16(request_bytes[2:4]),
+        totalBody: binary.BigEndian.Uint32(request_bytes[4:8]),
+        cas:       binary.BigEndian.Uint64(request_bytes[12:20]),
+    }
+    request.opaque[0] = request_bytes[8]
+    request.opaque[1] = request_bytes[9]
+    request.opaque[2] = request_bytes[10]
+    request.opaque[3] = request_bytes[11]
+
+    fmt.Printf("Magic:  0x%02x\n", request.magic)
+    fmt.Printf("Opcode: 0x%02x\n", request.opcode)
+    fmt.Printf("KeyLen: 0x%04x\n", request.keyLen)
+    fmt.Printf("ExtraL: 0x%02x\n", request.extrasLen)
+    fmt.Printf("DataT:  0x%02x\n", request.dataType)
+    fmt.Printf("vBuckt: 0x%04x\n", request.vBucketId)
+    fmt.Printf("TBody:  0x%08x\n", request.totalBody)
+    fmt.Printf("Opaque: 0x%08x\n", request.opaque)
+    fmt.Printf("Cas:    0x%016x\n\n", request.cas)
+
+    return request
+}
+
+func (rsp *ResponseHeader) GetBytes() []byte {
+    rsp_bytes := make([]byte, unsafe.Sizeof(ResponseHeader{}))
+    rsp_bytes[0] = byte(rsp.magic)
+    rsp_bytes[1] = byte(rsp.opcode)
+    fmt.Printf("Magic:  0x%02x\n", rsp_bytes[0])
+    fmt.Printf("Opcode: 0x%02x\n", rsp_bytes[1])
+
+    keyLen_bytes := make([]byte, 2)
+    binary.BigEndian.PutUint16(keyLen_bytes, uint16(rsp.keyLen))
+    rsp_bytes[2] = keyLen_bytes[0]
+    rsp_bytes[3] = keyLen_bytes[1]
+    fmt.Printf("KeyLen: 0x%04x\n", rsp_bytes[2:4])
+
+    rsp_bytes[4] = rsp.extrasLen
+    rsp_bytes[5] = rsp.dataType
+    fmt.Printf("Extra:  0x%02x\n", rsp_bytes[4])
+    fmt.Printf("DType:  0x%02x\n", rsp_bytes[5])
+
+    status_bytes := make([]byte, 2)
+    binary.BigEndian.PutUint16(status_bytes, uint16(rsp.status))
+    rsp_bytes[6] = status_bytes[0]
+    rsp_bytes[7] = status_bytes[1]
+    fmt.Printf("Status: 0x%04x\n", rsp_bytes[6:8])
+
+    totalBody_bytes := make([]byte, 4)
+    binary.BigEndian.PutUint32(totalBody_bytes, uint32(rsp.totalBody))
+    rsp_bytes[8] = totalBody_bytes[0]
+    rsp_bytes[9] = totalBody_bytes[1]
+    rsp_bytes[10] = totalBody_bytes[2]
+    rsp_bytes[11] = totalBody_bytes[3]
+    fmt.Printf("BodyL:  0x%08x\n", rsp_bytes[8:12])
+
+    rsp_bytes[12] = rsp.opaque[0]
+    rsp_bytes[13] = rsp.opaque[1]
+    rsp_bytes[14] = rsp.opaque[2]
+    rsp_bytes[15] = rsp.opaque[3]
+    fmt.Printf("Opaque: 0x%08x\n", rsp_bytes[12:16])
+
+    cas_bytes := make([]byte, 8)
+    binary.BigEndian.PutUint64(cas_bytes, uint64(rsp.cas))
+    rsp_bytes[16] = cas_bytes[0]
+    rsp_bytes[17] = cas_bytes[1]
+    rsp_bytes[18] = cas_bytes[2]
+    rsp_bytes[19] = cas_bytes[3]
+    rsp_bytes[20] = cas_bytes[4]
+    rsp_bytes[21] = cas_bytes[5]
+    rsp_bytes[22] = cas_bytes[6]
+    rsp_bytes[23] = cas_bytes[7]
+    fmt.Printf("CAS:    0x%016x\n\n", rsp_bytes[16:24])
+
+    return rsp_bytes
 }

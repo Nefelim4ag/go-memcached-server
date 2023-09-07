@@ -164,7 +164,7 @@ type memcachedEntry struct {
 	key string
 	flags uint32
 	exptime uint32
-	len uint64
+	len uint32
 	cas uint64
 	value []byte
 }
@@ -180,7 +180,7 @@ func set_add_replace(command string, args []string, client *bufio.ReadWriter, st
 	if err != nil {
 		return sendClientError(client.Writer, err.Error())
 	}
-	bytes, err := strconv.ParseUint(args[3], 10, 64)
+	bytes, err := strconv.ParseUint(args[3], 10, 32)
 	if err!= nil {
 		return sendClientError(client.Writer, err.Error())
 	}
@@ -189,7 +189,7 @@ func set_add_replace(command string, args []string, client *bufio.ReadWriter, st
 		key: key,
 		flags: uint32(flags),
 		exptime: uint32(exptime),
-		len: bytes,
+		len: uint32(bytes),
 		cas: uint64(time.Now().UnixNano()),
 		value: make([]byte, bytes),
 	}
@@ -225,7 +225,7 @@ func set_add_replace(command string, args []string, client *bufio.ReadWriter, st
             }
     }
 
-	err = store.Set(entry.key, entry, entry.len)
+	err = store.Set(entry.key, entry, uint64(entry.len))
 	if err!= nil {
 		return sendClientError(client.Writer, err.Error())
 	}
@@ -260,7 +260,7 @@ func append_prepend(command string, args []string, client *bufio.ReadWriter, sto
 		key: key,
 		flags: uint32(flags),
 		exptime: uint32(exptime),
-		len: bytes,
+		len: uint32(bytes),
 		cas: uint64(time.Now().UnixNano()),
 		value: make([]byte, bytes),
 	}
@@ -297,9 +297,9 @@ func append_prepend(command string, args []string, client *bufio.ReadWriter, sto
 			new_data := entry.value
 			entry.value = append(new_data, old_data[:]...)
     }
-	entry.len = uint64(len(entry.value))
+	entry.len = uint32(len(entry.value))
 
-	err = store.Set(entry.key, entry, entry.len)
+	err = store.Set(entry.key, entry, uint64(entry.len))
 	if err!= nil {
 		return sendClientError(client.Writer, err.Error())
 	}
@@ -325,7 +325,7 @@ func cas(args []string, client *bufio.ReadWriter, store *memstore.SharedStore) e
 	if err != nil {
 		return sendClientError(client.Writer, err.Error())
 	}
-	bytes, err := strconv.ParseUint(args[3], 10, 64)
+	bytes, err := strconv.ParseUint(args[3], 10, 32)
 	if err!= nil {
 		return sendClientError(client.Writer, err.Error())
 	}
@@ -338,7 +338,7 @@ func cas(args []string, client *bufio.ReadWriter, store *memstore.SharedStore) e
 		key: key,
 		flags: uint32(flags),
 		exptime: uint32(exptime),
-		len: bytes,
+		len: uint32(bytes),
 		cas: uint64(time.Now().UnixNano()),
 		value: make([]byte, bytes),
 	}
@@ -374,7 +374,7 @@ func cas(args []string, client *bufio.ReadWriter, store *memstore.SharedStore) e
 		return nil
 	}
 
-	err = store.Set(entry.key, entry, entry.len)
+	err = store.Set(entry.key, entry, uint64(entry.len))
 	if err!= nil {
 		return sendClientError(client.Writer, err.Error())
 	}
@@ -428,8 +428,8 @@ func incr_decr(command string, args []string, client *bufio.ReadWriter, store *m
 	}
 
 	v.value = []byte(fmt.Sprintf("%d", new_value))
-	v.len = uint64(len(v.value))
-	store.Set(key, v, v.len)
+	v.len = uint32(len(v.value))
+	store.Set(key, v, uint64(v.len))
 
 	if args[len(args) - 1] == "noreply" {
 		return nil
