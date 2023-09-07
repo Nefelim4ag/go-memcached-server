@@ -155,8 +155,7 @@ func CommandBinary(magic byte, client *bufio.ReadWriter, store *memstore.SharedS
             v, ok := store.Get(entry.key)
             if ok && request.cas != v.(memcachedEntry).cas {
                 response.status = Exist
-                Response(client.Writer, &response)
-                return nil
+                return Response(client.Writer, &response)
             }
         }
 
@@ -166,7 +165,32 @@ func CommandBinary(magic byte, client *bufio.ReadWriter, store *memstore.SharedS
         }
         response.cas = entry.cas
 
+        return Response(client.Writer, &response)
+    case Get:
+        key := make([]byte, request.keyLen)
+        _, err = client.Reader.Read(key)
+        if err != nil {
+            response.status = EInter
+            Response(client.Writer, &response)
+            return err
+        }
+
+        _v, ok := store.Get(string(key[:]))
+        if !ok {
+            response.status = NEnt
+            return Response(client.Writer, &response)
+        }
+
+        v := _v.(memcachedEntry)
+        response.cas = v.cas
+        response.extrasLen = 4
+        response.totalBody = 4 + uint32(len(v.value))
+        flags := flagsType(v.flags)
+
         Response(client.Writer, &response)
+        client.Writer.Write(flags.Bytes())
+        client.Writer.Write(v.value)
+        client.Writer.Flush()
 
         return nil
     case Quit:
@@ -175,10 +199,18 @@ func CommandBinary(magic byte, client *bufio.ReadWriter, store *memstore.SharedS
     case QuitQ:
         return fmt.Errorf("QuitQ")
     case NoOp:
-        Response(client.Writer, &response)
+        return Response(client.Writer, &response)
     }
 
     return fmt.Errorf("not implemented")
+}
+
+type flagsType uint32
+
+func (f flagsType) Bytes() []byte {
+    b := make([]byte, 4)
+    binary.BigEndian.PutUint32(b, uint32(f))
+    return b
 }
 
 type RequestHeader struct {
