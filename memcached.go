@@ -77,7 +77,6 @@ func HandleConnection(conn net.Conn, err error) {
 		case nil:
 			clientRequest := strings.TrimSpace(clientRequest)
 			err := HandleCommand(clientRequest, client)
-
 			if err!= nil {
                 log.Println(clientRequest, err)
 				client.Writer.Write([]byte("ERROR\r\n"))
@@ -112,6 +111,9 @@ func HandleCommand(request string, client *bufio.ReadWriter) error {
 	store := store
 
 	switch command {
+	case "version":
+		client.Writer.Write([]byte("VERSION 0.0.1\r\n"))
+
 	case "set", "add", "replace":
 		key := args[0]
 		if command == "add" {
