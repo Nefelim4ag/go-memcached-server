@@ -95,9 +95,10 @@ const (
 )
 
 // Magic
+type Magic byte
 const (
-    RequestMagic  = 0x80
-    ResponseMagic = 0x81
+    RequestMagic  Magic = 0x80
+    ResponseMagic Magic = 0x81
 )
 
 func CommandBinary(magic byte, client *bufio.ReadWriter, store *memstore.SharedStore) error {
@@ -111,7 +112,7 @@ func CommandBinary(magic byte, client *bufio.ReadWriter, store *memstore.SharedS
     raw_request = raw_request[3:] // Shift by 3 bytes
 
     request := RequestHeader{
-        magic:     magic,
+        magic:     Magic(magic),
         opcode:    OpcodeType(opcode),
         keyLen:    binary.LittleEndian.Uint16(keyLen),
         extrasLen: raw_request[0],
@@ -123,18 +124,20 @@ func CommandBinary(magic byte, client *bufio.ReadWriter, store *memstore.SharedS
     }
 
     switch request.opcode {
-    case Quit, QuitQ:
-        if request.opcode == Quit {
-            Response(client.Writer, NoErr)
-        }
-        return fmt.Errorf("quit")
+    case Quit:
+        Response(client.Writer, request.opcode, NoErr, request.opaque)
+        return fmt.Errorf("Quit")
+    case QuitQ:
+        return fmt.Errorf("QuitQ")
+    case NoOp:
+        Response(client.Writer, request.opcode, NoErr, request.opaque)
     }
 
     return fmt.Errorf("Not implemented")
 }
 
 type RequestHeader struct {
-    magic     uint8
+    magic     Magic
     opcode    OpcodeType
     keyLen    uint16
     extrasLen uint8
@@ -146,8 +149,8 @@ type RequestHeader struct {
 }
 
 type ResponseHeader struct {
-    magic     uint8
-    opcode    uint8
+    magic     Magic
+    opcode    OpcodeType
     keyLen    uint16
     extrasLen uint8
     dataType  uint8
@@ -157,26 +160,65 @@ type ResponseHeader struct {
     cas       uint64
 }
 
-func Response(w *bufio.Writer, status ResponseStatus) error {
+func Response(w *bufio.Writer, opcode OpcodeType, status ResponseStatus, opaque uint32) error {
     rsp := ResponseHeader{
-        magic: ResponseMagic,
+        magic:  ResponseMagic,
+        opcode: opcode,
         status: status,
+        opaque: opaque,
     }
 
     rsp_bytes := make([]byte, unsafe.Sizeof(ResponseHeader{}))
-    rsp_bytes[0] = rsp.magic
-    rsp_bytes[1] = rsp.opcode
+    rsp_bytes[0] = byte(rsp.magic)
+    rsp_bytes[1] = byte(rsp.opcode)
+    fmt.Printf("0x%x\n", rsp_bytes[0])
+    fmt.Printf("0x%x\n", rsp_bytes[1])
+
     keyLen_bytes := make([]byte, 2)
     binary.LittleEndian.PutUint16(keyLen_bytes, uint16(rsp.keyLen))
-    rsp_bytes = append(rsp_bytes, keyLen_bytes[:]...)
+    rsp_bytes[2] = keyLen_bytes[0]
+    rsp_bytes[3] = keyLen_bytes[1]
+    fmt.Printf("0x%x%x\n", rsp_bytes[2], rsp_bytes[3])
+
     rsp_bytes[4] = rsp.extrasLen
     rsp_bytes[5] = rsp.dataType
-    binary.LittleEndian.PutUint16(keyLen_bytes, uint16(rsp.status))
-    rsp_bytes = append(rsp_bytes, keyLen_bytes[:]...)
+    fmt.Printf("0x%x\n", rsp_bytes[4])
+    fmt.Printf("0x%x\n", rsp_bytes[5])
 
-    for _, v := range rsp_bytes {
-        fmt.Printf("0x%x\n", v)
-    }
+    status_bytes := make([]byte, 2)
+    binary.LittleEndian.PutUint16(status_bytes, uint16(rsp.status))
+    rsp_bytes[6] = status_bytes[0]
+    rsp_bytes[7] = status_bytes[1]
+    fmt.Printf("0x%x%x\n", rsp_bytes[6], rsp_bytes[7])
+
+    totalBody_bytes := make([]byte, 4)
+    binary.LittleEndian.PutUint32(totalBody_bytes, uint32(rsp.totalBody))
+    rsp_bytes[8] = totalBody_bytes[0]
+    rsp_bytes[9] = totalBody_bytes[1]
+    rsp_bytes[10] = totalBody_bytes[2]
+    rsp_bytes[11] = totalBody_bytes[3]
+    fmt.Printf("0x%x%x%x%x\n", rsp_bytes[8], rsp_bytes[9], rsp_bytes[10], rsp_bytes[11])
+
+    opaque_bytes := make([]byte, 4)
+    binary.LittleEndian.PutUint32(opaque_bytes, uint32(rsp.opaque))
+    rsp_bytes[12] = opaque_bytes[0]
+    rsp_bytes[13] = opaque_bytes[1]
+    rsp_bytes[14] = opaque_bytes[2]
+    rsp_bytes[15] = opaque_bytes[3]
+    fmt.Printf("0x%x%x%x%x\n", rsp_bytes[12], rsp_bytes[13], rsp_bytes[14], rsp_bytes[15])
+
+    cas_bytes := make([]byte, 8)
+    binary.LittleEndian.PutUint64(cas_bytes, uint64(rsp.cas))
+    rsp_bytes[16] = cas_bytes[0]
+    rsp_bytes[17] = cas_bytes[1]
+    rsp_bytes[18] = cas_bytes[2]
+    rsp_bytes[19] = cas_bytes[3]
+    rsp_bytes[20] = cas_bytes[4]
+    rsp_bytes[21] = cas_bytes[5]
+    rsp_bytes[22] = cas_bytes[6]
+    rsp_bytes[23] = cas_bytes[7]
+    fmt.Printf("0x%x%x%x%x", rsp_bytes[16], rsp_bytes[17], rsp_bytes[18], rsp_bytes[19])
+    fmt.Printf("%x%x%x%x\n", rsp_bytes[20], rsp_bytes[21], rsp_bytes[22], rsp_bytes[23])
 
     _, err := w.Write(rsp_bytes)
     if err != nil {

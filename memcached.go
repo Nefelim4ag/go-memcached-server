@@ -91,10 +91,11 @@ func HandleConnection(conn net.Conn, err error) {
 		} else if magic == 0x80 {
 			err = memcachedprotocol.CommandBinary(magic, client, store)
 			if err != nil {
+				log.Println(err)
 				return
 			}
 		} else {
-			log.Printf("client %s aborted unsupported protocol", conn.RemoteAddr())
+			log.Printf("client %s aborted - unsupported protocol", conn.RemoteAddr())
 		}
 	}
 }
