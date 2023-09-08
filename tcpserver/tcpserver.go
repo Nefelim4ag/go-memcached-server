@@ -7,51 +7,51 @@ import (
 	"time"
 )
 
-type tcpserver interface {
-	AcceptConnections()
-	Stop() error
+type (
+	ConnectionHandler func(conn *net.TCPConn, wg *sync.WaitGroup, err error)
+
+	TCPServer interface {
+		ListenAndServe(address string, connectionQueue uint)
+		AcceptConnections()
+		Stop() error
+	}
+
+	Server struct {
+		accepted sync.WaitGroup
+		listener *net.TCPListener
+		shutdown chan struct{}
+		handler  ConnectionHandler
+	}
+)
+
+func (s *Server) ListenAndServe(address string, handler ConnectionHandler) error {
+	addr, err := net.ResolveTCPAddr("tcp", address)
+	if err != nil {
+		return fmt.Errorf("failed to listen on address %s: %w", address, err)
+	}
+
+	s.listener, err = net.ListenTCP("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("failed to listen on address %s: %w", address, err)
+	}
+
+	s.handler = handler
+	s.shutdown = make(chan struct{})
+
+	return nil
 }
 
-type Server struct {
- wg         sync.WaitGroup
- listener   net.Listener
- shutdown   chan struct{}
-}
-
-func ListenAndServe(address string, connectionQueue uint) (*Server, error) {
- listener, err := net.Listen("tcp", address)
- if err != nil {
-  return nil, fmt.Errorf("failed to listen on address %s: %w", address, err)
- }
-
- if connectionQueue == 0 {
-	connectionQueue = 32
- }
-
- srv := &Server{
-	wg:         sync.WaitGroup{},
-    listener:   listener,
-    shutdown:   make(chan struct{}),
- }
-
- return srv, nil
-}
-
-
-type ConnectionHandler func(connection net.Conn, err error)
-
-func (s *Server) AcceptConnections(handleConnection ConnectionHandler) {
-	s.wg.Add(1)
-	defer s.wg.Done()
+func (s *Server) AcceptConnections() {
+	s.accepted.Add(1)
+	defer s.accepted.Done()
 
 	for {
 		select {
-			case <-s.shutdown:
+		case <-s.shutdown:
 			return
-
 		default:
-			connection, err := s.listener.Accept()
-			go handleConnection(connection, err)
+			connection, err := s.listener.AcceptTCP()
+			go s.handler(connection, &s.accepted, err)
 		}
 	}
 }
@@ -62,15 +62,15 @@ func (s *Server) Stop() error {
 
 	done := make(chan struct{})
 	go func() {
-		s.wg.Wait()
+		s.accepted.Wait()
 		close(done)
 	}()
 
 	select {
-		case <-done:
-			return nil
-		case <-time.After(2 * time.Second):
-			fmt.Println("Timed out waiting for connections to finish.")
-			return nil
+	case <-done:
+		return nil
+	case <-time.After(2 * time.Second):
+		fmt.Println("Timed out waiting for connections to finish.")
+		return nil
 	}
 }

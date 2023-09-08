@@ -9,10 +9,15 @@ Base binary protocol - in progress
 # Performance
 
 Main performance issue is with `net.Conn.Write` is too slow on small requests.
+net.(*conn).Write -> net.(*netFD).Write -> internal/poll.(*FD).Write -> internal/poll.ignoringEINTRIO -> syscall.write ...
 
 `go-memcached-server -m 2048`
 ```
-[RUN #1 100%,  30 secs]  0 threads:     1070830 ops,   35289 (avg:   35692) ops/sec, 3.13GB/sec (avg: 3.17GB/sec),  0.45 (avg:  0.45) msec latency
+~ docker run --network=host --rm redislabs/memtier_benchmark:latest -h ::1 -p 11211 -P memcache_binary -c4 -t4 --test-time 30 --hide-histogram -d $((1024*1024))
+Writing results to stdout
+[RUN #1] Preparing benchmark client...
+[RUN #1] Launching threads now...
+[RUN #1 100%,  30 secs]  0 threads:     1061410 ops,   33645 (avg:   35379) ops/sec, 2.99GB/sec (avg: 3.14GB/sec),  0.47 (avg:  0.45) msec latency
 
 4         Threads
 4         Connections per thread
@@ -23,10 +28,10 @@ ALL STATS
 ============================================================================================================================
 Type         Ops/sec     Hits/sec   Misses/sec    Avg. Latency     p50 Latency     p99 Latency   p99.9 Latency       KB/sec
 ----------------------------------------------------------------------------------------------------------------------------
-Sets         3245.19          ---          ---         3.58197         3.51900         5.79100         6.81500   3323209.16
-Gets        32447.19         2.40     32444.79         0.13386         0.07900         0.86300         1.71900      3277.86
+Sets         3216.74          ---          ---         3.60373         3.51900         5.82300         7.00700   3294084.81
+Gets        32162.53         6.30     32156.23         0.13619         0.07900         0.91100         1.87900      1221.43
 Waits           0.00          ---          ---             ---             ---             ---             ---          ---
-Totals      35692.38         2.40     32444.79         0.44737         0.08700         4.51100         5.75900   3326487.03
+Totals      35379.26         6.30     32156.23         0.45146         0.08700         4.60700         5.82300   3295306.24
 ```
 
 `memcached -m 2048 -p 11211`

@@ -12,6 +12,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 
 	"net/http"
@@ -22,49 +23,14 @@ var (
 	store *memstore.SharedStore
 )
 
-func main() {
-	_memstore_size := flag.Uint64("m", 512, "items memory in megabytes, default is 512")
-	_memstore_item_size := flag.Uint64("I", 1024*1024, "max item sizem, default is 1m")
-	flag.Parse()
-
-	memstore_size := uint64(*_memstore_size) * 1024 * 1024
-	memstore_item_size := uint64(*_memstore_item_size)
-
-	// Wait for a SIGINT or SIGTERM signal to gracefully shut down the server
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-
-	go func() {
-		log.Println(http.ListenAndServe("127.0.0.1:6060", nil))
-	}()
-
-	store = memstore.NewSharedStore()
-	store.SetMemoryLimit(memstore_size)
-	store.SetItemSizeLimit(memstore_item_size)
-
-	srv, err := tcpserver.ListenAndServe(":11211", 32)
-	if err!= nil {
-        log.Fatal(err)
-    }
-
-	acceptThreads := 4
-	for acceptThreads > 0 {
-		acceptThreads -= 1
-		go srv.AcceptConnections(HandleConnection)
-	}
-
-	<-sigChan
-	fmt.Println("Shutting down server...")
-	srv.Stop()
-	fmt.Println("Server stopped.")
-}
-
-func HandleConnection(conn net.Conn, err error) {
+func ConnectionHandler(conn *net.TCPConn, wg *sync.WaitGroup, err error) {
 	if err!= nil {
         log.Println(err)
         return
     }
 
+	wg.Add(1)
+	defer wg.Done()
 	defer conn.Close()
 
 	_r := bufio.NewReader(conn)
@@ -98,4 +64,43 @@ func HandleConnection(conn net.Conn, err error) {
 			log.Printf("client %s aborted - unsupported protocol", conn.RemoteAddr())
 		}
 	}
+}
+
+func main() {
+	_memstore_size := flag.Uint64("m", 512, "items memory in megabytes, default is 512")
+	_memstore_item_size := flag.Uint64("I", 1024*1024, "max item sizem, default is 1m")
+	flag.Parse()
+
+	memstore_size := uint64(*_memstore_size) * 1024 * 1024
+	memstore_item_size := uint64(*_memstore_item_size)
+
+	// Wait for a SIGINT or SIGTERM signal to gracefully shut down the server
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+
+	// pprof
+	go func() {
+		log.Println(http.ListenAndServe("127.0.0.1:6060", nil))
+	}()
+
+	store = memstore.NewSharedStore()
+	store.SetMemoryLimit(memstore_size)
+	store.SetItemSizeLimit(memstore_item_size)
+
+	srvInstance := tcpserver.Server{}
+	err := srvInstance.ListenAndServe(":11211", ConnectionHandler)
+	if err!= nil {
+        log.Fatal(err)
+    }
+
+	acceptThreads := 4
+	for acceptThreads > 0 {
+		acceptThreads -= 1
+		go srvInstance.AcceptConnections()
+	}
+
+	<-sigChan
+	fmt.Println("Shutting down server...")
+	srvInstance.Stop()
+	fmt.Println("Server stopped.")
 }
