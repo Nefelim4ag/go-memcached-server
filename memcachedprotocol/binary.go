@@ -139,10 +139,10 @@ type ResponseHeader struct {
 }
 
 type BinaryProcessor struct {
-    store *memstore.SharedStore[string, MemcachedEntry]
+    store *memstore.SharedStore[MemcachedEntry]
     rb    *bufio.Reader
     wb    *bufio.Writer
-    cw    chan  *[]byte
+    // cw    chan  *[]byte
 
     raw_request  []byte
     flags        []byte
@@ -153,12 +153,12 @@ type BinaryProcessor struct {
     key          []byte
 }
 
-func CreateBinaryProcessor(rb *bufio.Reader, wb *bufio.Writer, store *memstore.SharedStore[string, MemcachedEntry]) *BinaryProcessor {
+func CreateBinaryProcessor(rb *bufio.Reader, wb *bufio.Writer, store *memstore.SharedStore[MemcachedEntry]) *BinaryProcessor {
     return &BinaryProcessor{
         store:        store,
         rb:           rb,
         wb:           wb,
-        cw:           make(chan *[]byte, 1024),
+        // cw:           make(chan *[]byte, 1024),
         raw_request:  make([]byte, unsafe.Sizeof(RequestHeader{})),
         flags:        make([]byte, 4),
         exptime:      make([]byte, 4),
@@ -166,17 +166,17 @@ func CreateBinaryProcessor(rb *bufio.Reader, wb *bufio.Writer, store *memstore.S
     }
 }
 
-func (ctx *BinaryProcessor) Close() {
-    close(ctx.cw)
-}
+// func (ctx *BinaryProcessor) Close() {
+//     close(ctx.cw)
+// }
 
-func (ctx *BinaryProcessor) ASyncWriter() {
-    for b := range ctx.cw {
-        fmt.Printf("%048x\n", *b)
-        ctx.wb.Write(*b)
-        ctx.wb.Flush()
-    }
-}
+// func (ctx *BinaryProcessor) ASyncWriter() {
+//     for b := range ctx.cw {
+//         fmt.Printf("%048x\n", *b)
+//         ctx.wb.Write(*b)
+//         ctx.wb.Flush()
+//     }
+// }
 
 func (ctx *BinaryProcessor) CommandBinary() error {
     err := ctx.ReadRequest()
@@ -266,7 +266,10 @@ func (ctx *BinaryProcessor) CommandBinary() error {
 
         return ctx.Response()
     case Get, GetQ:
-        key := make([]byte, ctx.request.keyLen)
+        key := ctx.key
+        if uint16(len(ctx.key)) != ctx.request.keyLen {
+            key = make([]byte, ctx.request.keyLen)
+        }
         _, err = ctx.rb.Read(key)
         if err != nil {
             ctx.response.status = EInter
@@ -327,7 +330,7 @@ func (ctx *BinaryProcessor) CommandBinary() error {
         return ctx.Response()
     }
 
-    return fmt.Errorf("not implemented")
+    return fmt.Errorf("not implemented opcode: %02x", ctx.request.opcode)
 }
 
 func (ctx *BinaryProcessor) ReadRequest() error {

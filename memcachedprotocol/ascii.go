@@ -14,12 +14,12 @@ import (
 )
 
 type ASCIIProcessor struct {
-    store *memstore.SharedStore[string, MemcachedEntry]
+    store *memstore.SharedStore[MemcachedEntry]
     rb    *bufio.Reader
     wb    *bufio.Writer
 }
 
-func CreateASCIIProcessor(rb *bufio.Reader, wb *bufio.Writer, store *memstore.SharedStore[string, MemcachedEntry]) *ASCIIProcessor {
+func CreateASCIIProcessor(rb *bufio.Reader, wb *bufio.Writer, store *memstore.SharedStore[MemcachedEntry]) *ASCIIProcessor {
     return &ASCIIProcessor{
         store:        store,
         rb:           rb,

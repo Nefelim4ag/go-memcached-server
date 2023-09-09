@@ -20,7 +20,7 @@ import (
 )
 
 var (
-	store *memstore.SharedStore[string, memcachedprotocol.MemcachedEntry]
+	store *memstore.SharedStore[memcachedprotocol.MemcachedEntry]
 )
 
 func ConnectionHandler(conn *net.TCPConn, wg *sync.WaitGroup, err error) {
@@ -39,7 +39,7 @@ func ConnectionHandler(conn *net.TCPConn, wg *sync.WaitGroup, err error) {
 	// Reuse context between binary commands
 	binaryProcessor := memcachedprotocol.CreateBinaryProcessor(_r, _w, store)
 	// go binaryProcessor.ASyncWriter()
-	defer binaryProcessor.Close()
+	// defer binaryProcessor.Close()
 	asciiProcessor := memcachedprotocol.CreateASCIIProcessor(_r, _w, store)
 
 	// Waiting for the client request
@@ -97,8 +97,7 @@ func main() {
 			log.Error(http.ListenAndServe("127.0.0.1:6060", nil))
 		}()
 	}
-
-	store = memstore.NewSharedStore[string, memcachedprotocol.MemcachedEntry]()
+	store = memstore.NewSharedStore[memcachedprotocol.MemcachedEntry]()
 	store.SetMemoryLimit(memstore_size)
 	store.SetItemSizeLimit(memstore_item_size)
 
