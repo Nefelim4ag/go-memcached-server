@@ -5,29 +5,29 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"log"
 	"nefelim4ag/go-memcached-server/memcachedprotocol"
 	"nefelim4ag/go-memcached-server/memstore"
 	"nefelim4ag/go-memcached-server/tcpserver"
 	"net"
+	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"os/signal"
 	"sync"
 	"syscall"
 
-	"net/http"
-	_ "net/http/pprof"
+	log "github.com/sirupsen/logrus"
 )
 
 var (
-	store *memstore.SharedStore
+	store *memstore.SharedStore[string, memcachedprotocol.MemcachedEntry]
 )
 
 func ConnectionHandler(conn *net.TCPConn, wg *sync.WaitGroup, err error) {
-	if err!= nil {
-        log.Println(err)
-        return
-    }
+	if err != nil {
+		log.Errorf(err.Error())
+		return
+	}
 
 	wg.Add(1)
 	defer wg.Done()
@@ -35,41 +35,55 @@ func ConnectionHandler(conn *net.TCPConn, wg *sync.WaitGroup, err error) {
 
 	_r := bufio.NewReader(conn)
 	_w := bufio.NewWriter(conn)
-	client := bufio.NewReadWriter(_r, _w)
-	for {
-		// Waiting for the client request
-		magic, err := client.Reader.ReadByte()
 
+	// Reuse context between binary commands
+	binaryProcessor := memcachedprotocol.CreateBinaryProcessor(_r, _w, store)
+	// go binaryProcessor.ASyncWriter()
+	defer binaryProcessor.Close()
+	asciiProcessor := memcachedprotocol.CreateASCIIProcessor(_r, _w, store)
+
+	// Waiting for the client request
+	for {
+		magic, err := _r.ReadByte()
+		_r.UnreadByte()
 		switch err {
 		case nil:
 		case io.EOF:
-			log.Printf("client %s closed connection", conn.RemoteAddr())
+			log.Infof("client %s closed connection", conn.RemoteAddr())
 			return
 		default:
-			log.Printf("error: %v\n", err)
+			log.Errorf("error: %v\n", err)
 			return
 		}
+
 		if magic < 0x80 {
-			err = memcachedprotocol.CommandAscii(magic, client, store)
+			err = asciiProcessor.CommandAscii()
 			if err != nil {
 				return
 			}
 		} else if magic == 0x80 {
-			err = memcachedprotocol.CommandBinary(magic, client, store)
+			err = binaryProcessor.CommandBinary()
 			if err != nil {
 				log.Println(err)
 				return
 			}
 		} else {
-			log.Printf("client %s aborted - unsupported protocol", conn.RemoteAddr())
+			log.Errorf("client %s aborted - unsupported protocol 0x%02x ~ %s", conn.RemoteAddr(), magic, string(magic))
 		}
 	}
 }
 
 func main() {
+    log.SetOutput(os.Stdout)
+    log.SetLevel(log.DebugLevel)
+
 	_memstore_size := flag.Uint64("m", 512, "items memory in megabytes, default is 512")
 	_memstore_item_size := flag.Uint64("I", 1024*1024, "max item sizem, default is 1m")
+	logLevel := flag.Uint("loglevel", 3, "log level, 5=debug, 4=info, 3=warning, 2=error, 1=fatal, 0=panic")
+	pprof := flag.Bool("pprof", false, "enable pprof server")
 	flag.Parse()
+
+	log.SetLevel(log.Level(*logLevel))
 
 	memstore_size := uint64(*_memstore_size) * 1024 * 1024
 	memstore_item_size := uint64(*_memstore_item_size)
@@ -78,22 +92,23 @@ func main() {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
-	// pprof
-	go func() {
-		log.Println(http.ListenAndServe("127.0.0.1:6060", nil))
-	}()
+	if *pprof {
+		go func() {
+			log.Error(http.ListenAndServe("127.0.0.1:6060", nil))
+		}()
+	}
 
-	store = memstore.NewSharedStore()
+	store = memstore.NewSharedStore[string, memcachedprotocol.MemcachedEntry]()
 	store.SetMemoryLimit(memstore_size)
 	store.SetItemSizeLimit(memstore_item_size)
 
 	srvInstance := tcpserver.Server{}
 	err := srvInstance.ListenAndServe(":11211", ConnectionHandler)
-	if err!= nil {
-        log.Fatal(err)
-    }
+	if err != nil {
+		log.Fatal(err)
+	}
 
-	acceptThreads := 4
+	acceptThreads := 2
 	for acceptThreads > 0 {
 		acceptThreads -= 1
 		go srvInstance.AcceptConnections()

@@ -5,6 +5,8 @@ import (
 	"net"
 	"sync"
 	"time"
+
+	log "github.com/sirupsen/logrus"
 )
 
 type (
@@ -27,13 +29,14 @@ type (
 func (s *Server) ListenAndServe(address string, handler ConnectionHandler) error {
 	addr, err := net.ResolveTCPAddr("tcp", address)
 	if err != nil {
-		return fmt.Errorf("failed to listen on address %s: %w", address, err)
+		return fmt.Errorf("failed to resolve address %s: %w", address, err)
 	}
 
 	s.listener, err = net.ListenTCP("tcp", addr)
 	if err != nil {
 		return fmt.Errorf("failed to listen on address %s: %w", address, err)
 	}
+	log.Infof("Listening on %s", address)
 
 	s.handler = handler
 	s.shutdown = make(chan struct{})

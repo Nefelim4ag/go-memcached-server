@@ -8,6 +8,8 @@ import (
 	"nefelim4ag/go-memcached-server/memstore"
 	"time"
 	"unsafe"
+
+	log "github.com/sirupsen/logrus"
 )
 
 // opcodes
@@ -104,117 +106,6 @@ const (
     ResponseMagic Magic = 0x81
 )
 
-func CommandBinary(magic byte, client *bufio.ReadWriter, store *memstore.SharedStore) error {
-    raw_request := make([]byte, unsafe.Sizeof(RequestHeader{})-1)
-    _, err := client.Reader.Read(raw_request)
-    if err != nil {
-        return err
-    }
-    request := DecodeRequestHeader(Magic(magic), raw_request)
-
-    // By protocol opcode & opaque same as client request
-    response := ResponseHeader{
-        magic:  ResponseMagic,
-        opcode: request.opcode,
-        status: NoErr,
-        opaque: request.opaque,
-    }
-
-    switch request.opcode {
-    case Set, SetQ:
-        flags := make([]byte, 4)
-        exptime := make([]byte, 4)
-        key := make([]byte, request.keyLen)
-        bodyLen := request.totalBody - uint32(request.keyLen) - uint32(request.extrasLen)
-        value := make([]byte, bodyLen)
-        err_s := make([]error, 4)
-        _, err_s[0] = client.Reader.Read(flags)
-        _, err_s[1] = client.Reader.Read(exptime)
-        _, err_s[2] = client.Reader.Read(key)
-        if bodyLen > 0 {
-            _, err_s[3] = io.ReadFull(client.Reader, value)
-        }
-        for _, err := range err_s {
-            if err != nil {
-                response.status = EInter
-                Response(client.Writer, &response)
-                return err
-            }
-        }
-        // log.Printf("Flags:  0x%08x\n", flags)
-        // log.Printf("ExpTim: 0x%08x\n", exptime)
-        // log.Printf("Key:    %s\n\n", key)
-
-        entry := memcachedEntry{
-            key: string(key[:]),
-            flags: binary.BigEndian.Uint32(flags),
-            exptime: binary.BigEndian.Uint32(exptime),
-            len: bodyLen,
-            cas: uint64(time.Now().UnixNano()),
-            value: value,
-        }
-
-        if request.cas != 0 {
-            v, ok := store.Get(entry.key)
-            if ok && request.cas != v.(memcachedEntry).cas {
-                response.status = Exist
-                return Response(client.Writer, &response)
-            }
-        }
-
-        err = store.Set(entry.key, entry, uint64(entry.len))
-        if err != nil {
-            return err
-        }
-        response.cas = entry.cas
-
-        if request.opcode == SetQ {
-            return nil
-        }
-
-        return Response(client.Writer, &response)
-    case Get, GetQ:
-        key := make([]byte, request.keyLen)
-        _, err = client.Reader.Read(key)
-        if err != nil {
-            response.status = EInter
-            Response(client.Writer, &response)
-            return err
-        }
-
-        _v, ok := store.Get(string(key[:]))
-        if !ok {
-            if request.opcode == GetQ {
-                return nil
-            }
-            response.status = NEnt
-            return Response(client.Writer, &response)
-        }
-
-        v := _v.(memcachedEntry)
-        response.cas = v.cas
-        response.extrasLen = 4
-        response.totalBody = 4 + uint32(len(v.value))
-        flags := flagsType(v.flags)
-
-        Response(client.Writer, &response)
-        client.Writer.Write(flags.Bytes())
-        client.Writer.Write(v.value)
-        client.Writer.Flush()
-
-        return nil
-    case Quit:
-        Response(client.Writer, &response)
-        return fmt.Errorf("Quit")
-    case QuitQ:
-        return fmt.Errorf("QuitQ")
-    case NoOp:
-        return Response(client.Writer, &response)
-    }
-
-    return fmt.Errorf("not implemented")
-}
-
 type flagsType uint32
 
 func (f flagsType) Bytes() []byte {
@@ -247,100 +138,291 @@ type ResponseHeader struct {
     cas       uint64
 }
 
-func Response(w *bufio.Writer, rsp *ResponseHeader) error {
-    rsp_bytes := rsp.GetBytes()
+type BinaryProcessor struct {
+    store *memstore.SharedStore[string, MemcachedEntry]
+    rb    *bufio.Reader
+    wb    *bufio.Writer
+    cw    chan  *[]byte
 
-    _, err := w.Write(rsp_bytes)
+    raw_request  []byte
+    flags        []byte
+    exptime      []byte
+    request      RequestHeader
+    response     ResponseHeader
+    response_raw []byte
+    key          []byte
+}
+
+func CreateBinaryProcessor(rb *bufio.Reader, wb *bufio.Writer, store *memstore.SharedStore[string, MemcachedEntry]) *BinaryProcessor {
+    return &BinaryProcessor{
+        store:        store,
+        rb:           rb,
+        wb:           wb,
+        cw:           make(chan *[]byte, 1024),
+        raw_request:  make([]byte, unsafe.Sizeof(RequestHeader{})),
+        flags:        make([]byte, 4),
+        exptime:      make([]byte, 4),
+        response_raw: make([]byte, unsafe.Sizeof(ResponseHeader{})),
+    }
+}
+
+func (ctx *BinaryProcessor) Close() {
+    close(ctx.cw)
+}
+
+func (ctx *BinaryProcessor) ASyncWriter() {
+    for b := range ctx.cw {
+        fmt.Printf("%048x\n", *b)
+        ctx.wb.Write(*b)
+        ctx.wb.Flush()
+    }
+}
+
+func (ctx *BinaryProcessor) CommandBinary() error {
+    err := ctx.ReadRequest()
     if err != nil {
         return err
     }
-    w.Flush()
+
+    defer ctx.wb.Flush()
+
+    ctx.DecodeRequestHeader()
+
+    // By protocol opcode & opaque same as client request
+    ctx.response = ResponseHeader{
+        magic:  ResponseMagic,
+        opcode: ctx.request.opcode,
+        status: NoErr,
+        opaque: ctx.request.opaque,
+    }
+
+    switch ctx.request.opcode {
+    case Set, SetQ, Add, AddQ:
+        flags := ctx.flags
+        exptime := ctx.exptime
+        key := ctx.key
+        if uint16(len(ctx.key)) != ctx.request.keyLen {
+            key = make([]byte, ctx.request.keyLen)
+        }
+        bodyLen := ctx.request.totalBody - uint32(ctx.request.keyLen) - uint32(ctx.request.extrasLen)
+        value := make([]byte, bodyLen)
+        err_s := make([]error, 4)
+        _, err_s[0] = ctx.rb.Read(flags)
+        _, err_s[1] = ctx.rb.Read(exptime)
+        _, err_s[2] = ctx.rb.Read(key)
+        if bodyLen > 0 {
+            _, err_s[3] = io.ReadFull(ctx.rb, value)
+        }
+        for _, err := range err_s {
+            if err != nil {
+                ctx.response.status = EInter
+                ctx.Response()
+                return err
+            }
+        }
+        if log.GetLevel() == log.DebugLevel {
+            log.Debugf("Flags:  0x%08x\n", flags)
+            log.Debugf("ExpTim: 0x%08x\n", exptime)
+            log.Debugf("Key:    %s\n\n", key)
+        }
+
+        entry := MemcachedEntry{
+            key:     string(key[:]),
+            flags:   binary.BigEndian.Uint32(flags),
+            exptime: binary.BigEndian.Uint32(exptime),
+            len:     bodyLen,
+            cas:     uint64(time.Now().UnixNano()),
+            value:   value,
+        }
+
+        if ctx.request.cas != 0 {
+            v, ok := ctx.store.Get(entry.key)
+            if ok && ctx.request.cas != v.cas {
+                ctx.response.status = Exist
+                return ctx.Response()
+            }
+        }
+
+        if ctx.request.opcode == Add || ctx.request.opcode == AddQ {
+            _, ok := ctx.store.Get(entry.key)
+            if ok {
+                ctx.response.status = Exist
+                // v := _v.(MemcachedEntry)
+                ctx.Response()
+                // ctx.wb.Write(v.value)
+                return nil
+            }
+        }
+
+        err = ctx.store.Set(entry.key, entry, uint64(entry.len))
+        if err != nil {
+            return err
+        }
+        ctx.response.cas = entry.cas
+
+        if ctx.request.opcode == SetQ || ctx.request.opcode == AddQ {
+            return nil
+        }
+
+        return ctx.Response()
+    case Get, GetQ:
+        key := make([]byte, ctx.request.keyLen)
+        _, err = ctx.rb.Read(key)
+        if err != nil {
+            ctx.response.status = EInter
+            ctx.Response()
+            return err
+        }
+
+        _v, ok := ctx.store.Get(string(key[:]))
+
+        if !ok {
+            if ctx.request.opcode == GetQ {
+                return nil
+            }
+            ctx.response.status = NEnt
+            return ctx.Response()
+        }
+        v := _v
+
+        ctx.response.cas = v.cas
+        ctx.response.extrasLen = 4
+        ctx.response.totalBody = 4 + uint32(len(v.value))
+        flags := flagsType(v.flags).Bytes()
+
+        ctx.Response()
+        ctx.wb.Write(flags)
+        //ctx.cw <- &flags
+        ctx.wb.Write(v.value)
+        //ctx.cw <- &v.value
+
+        return nil
+    case Flush, FlushQ:
+        exptime := ctx.exptime
+        if ctx.request.extrasLen == 4 {
+            _, err = ctx.rb.Read(exptime)
+            if err!= nil {
+                ctx.response.status = EInter
+                ctx.Response()
+                return err
+            }
+            if log.GetLevel() == log.DebugLevel {
+                log.Debugf("ExpTim: 0x%08x\n", exptime)
+            }
+        }
+
+        ctx.store.Flush()
+
+        if ctx.request.opcode == FlushQ {
+            return nil
+        }
+
+        return ctx.Response()
+    case Quit:
+        ctx.Response()
+        return fmt.Errorf("Quit")
+    case QuitQ:
+        return fmt.Errorf("QuitQ")
+    case NoOp:
+        return ctx.Response()
+    }
+
+    return fmt.Errorf("not implemented")
+}
+
+func (ctx *BinaryProcessor) ReadRequest() error {
+    _, err := ctx.rb.Read(ctx.raw_request)
+
+    if err != nil {
+        return err
+    }
 
     return nil
 }
 
-func DecodeRequestHeader(magic Magic, request_bytes []byte) RequestHeader {
-    opcode := request_bytes[0]
-    keyLen := request_bytes[1:3]
-    request_bytes = request_bytes[3:] // Shift by 3 bytes
+func (ctx *BinaryProcessor) Response() error {
+    ctx.PrepareResponse()
 
-    request := RequestHeader{
-        magic:     Magic(magic),
-        opcode:    OpcodeType(opcode),
-        keyLen:    binary.BigEndian.Uint16(keyLen),
-        extrasLen: request_bytes[0],
-        dataType:  request_bytes[1],
-        vBucketId: binary.BigEndian.Uint16(request_bytes[2:4]),
-        totalBody: binary.BigEndian.Uint32(request_bytes[4:8]),
-        cas:       binary.BigEndian.Uint64(request_bytes[12:20]),
+    // ctx.cw <- &ctx.response_raw
+    _, err := ctx.wb.Write(ctx.response_raw)
+    if err != nil {
+        return err
     }
-    request.opaque[0] = request_bytes[8]
-    request.opaque[1] = request_bytes[9]
-    request.opaque[2] = request_bytes[10]
-    request.opaque[3] = request_bytes[11]
 
-    // log.Printf("Magic:  0x%02x\n", request.magic)
-    // log.Printf("Opcode: 0x%02x\n", request.opcode)
-    // log.Printf("KeyLen: 0x%04x\n", request.keyLen)
-    // log.Printf("ExtraL: 0x%02x\n", request.extrasLen)
-    // log.Printf("DataT:  0x%02x\n", request.dataType)
-    // log.Printf("vBuckt: 0x%04x\n", request.vBucketId)
-    // log.Printf("TBody:  0x%08x\n", request.totalBody)
-    // log.Printf("Opaque: 0x%08x\n", request.opaque)
-    // log.Printf("Cas:    0x%016x\n\n", request.cas)
-
-    return request
+    return nil
 }
 
-func (rsp *ResponseHeader) GetBytes() []byte {
-    rsp_bytes := make([]byte, unsafe.Sizeof(ResponseHeader{}))
-    rsp_bytes[0] = byte(rsp.magic)
-    rsp_bytes[1] = byte(rsp.opcode)
-    // log.Printf("Magic:  0x%02x\n", rsp_bytes[0])
-    // log.Printf("Opcode: 0x%02x\n", rsp_bytes[1])
+func (ctx *BinaryProcessor) DecodeRequestHeader() {
+    ctx.request.magic = Magic(ctx.raw_request[0])
+    ctx.request.opcode = OpcodeType(ctx.raw_request[1])
+    ctx.request.keyLen = binary.BigEndian.Uint16(ctx.raw_request[2:4])
+    ctx.request.extrasLen = ctx.raw_request[4]
+    ctx.request.dataType = ctx.raw_request[5]
+    ctx.request.vBucketId = binary.BigEndian.Uint16(ctx.raw_request[6:8])
+    ctx.request.totalBody = binary.BigEndian.Uint32(ctx.raw_request[8:12])
+    ctx.request.opaque[0] = ctx.raw_request[12]
+    ctx.request.opaque[1] = ctx.raw_request[13]
+    ctx.request.opaque[2] = ctx.raw_request[14]
+    ctx.request.opaque[3] = ctx.raw_request[15]
+    ctx.request.cas = binary.BigEndian.Uint64(ctx.raw_request[16:24])
 
-    keyLen_bytes := make([]byte, 2)
-    binary.BigEndian.PutUint16(keyLen_bytes, uint16(rsp.keyLen))
-    rsp_bytes[2] = keyLen_bytes[0]
-    rsp_bytes[3] = keyLen_bytes[1]
-    // log.Printf("KeyLen: 0x%04x\n", rsp_bytes[2:4])
+    if log.GetLevel() == log.DebugLevel {
+        log.Debugf("Magic:  0x%02x\n", ctx.request.magic)
+        log.Debugf("Opcode: 0x%02x\n", ctx.request.opcode)
+        log.Debugf("KeyLen: 0x%04x\n", ctx.request.keyLen)
+        log.Debugf("ExtraL: 0x%02x\n", ctx.request.extrasLen)
+        log.Debugf("DataT:  0x%02x\n", ctx.request.dataType)
+        log.Debugf("vBuckt: 0x%04x\n", ctx.request.vBucketId)
+        log.Debugf("TBody:  0x%08x\n", ctx.request.totalBody)
+        log.Debugf("Opaque: 0x%08x\n", ctx.request.opaque)
+        log.Debugf("Cas:    0x%016x\n\n", ctx.request.cas)
+    }
+}
 
-    rsp_bytes[4] = rsp.extrasLen
-    rsp_bytes[5] = rsp.dataType
-    // log.Printf("Extra:  0x%02x\n", rsp_bytes[4])
-    // log.Printf("DType:  0x%02x\n", rsp_bytes[5])
+func (ctx *BinaryProcessor) PrepareResponse() {
+    ctx.response_raw[0] = byte(ctx.response.magic)
+    ctx.response_raw[1] = byte(ctx.response.opcode)
 
-    status_bytes := make([]byte, 2)
-    binary.BigEndian.PutUint16(status_bytes, uint16(rsp.status))
-    rsp_bytes[6] = status_bytes[0]
-    rsp_bytes[7] = status_bytes[1]
-    // log.Printf("Status: 0x%04x\n", rsp_bytes[6:8])
+    binary.BigEndian.PutUint16(ctx.raw_request, uint16(ctx.response.keyLen))
+    ctx.response_raw[2] = ctx.raw_request[0]
+    ctx.response_raw[3] = ctx.raw_request[1]
 
-    totalBody_bytes := make([]byte, 4)
-    binary.BigEndian.PutUint32(totalBody_bytes, uint32(rsp.totalBody))
-    rsp_bytes[8] = totalBody_bytes[0]
-    rsp_bytes[9] = totalBody_bytes[1]
-    rsp_bytes[10] = totalBody_bytes[2]
-    rsp_bytes[11] = totalBody_bytes[3]
-    // log.Printf("BodyL:  0x%08x\n", rsp_bytes[8:12])
+    ctx.response_raw[4] = ctx.response.extrasLen
+    ctx.response_raw[5] = ctx.response.dataType
 
-    rsp_bytes[12] = rsp.opaque[0]
-    rsp_bytes[13] = rsp.opaque[1]
-    rsp_bytes[14] = rsp.opaque[2]
-    rsp_bytes[15] = rsp.opaque[3]
-    // log.Printf("Opaque: 0x%08x\n", rsp_bytes[12:16])
+    binary.BigEndian.PutUint16(ctx.raw_request, uint16(ctx.response.status))
+    ctx.response_raw[6] = ctx.raw_request[0]
+    ctx.response_raw[7] = ctx.raw_request[1]
 
-    cas_bytes := make([]byte, 8)
-    binary.BigEndian.PutUint64(cas_bytes, uint64(rsp.cas))
-    rsp_bytes[16] = cas_bytes[0]
-    rsp_bytes[17] = cas_bytes[1]
-    rsp_bytes[18] = cas_bytes[2]
-    rsp_bytes[19] = cas_bytes[3]
-    rsp_bytes[20] = cas_bytes[4]
-    rsp_bytes[21] = cas_bytes[5]
-    rsp_bytes[22] = cas_bytes[6]
-    rsp_bytes[23] = cas_bytes[7]
-    // log.Printf("CAS:    0x%016x\n\n", rsp_bytes[16:24])
+    binary.BigEndian.PutUint32(ctx.raw_request, uint32(ctx.response.totalBody))
+    ctx.response_raw[8] = ctx.raw_request[0]
+    ctx.response_raw[9] = ctx.raw_request[1]
+    ctx.response_raw[10] = ctx.raw_request[2]
+    ctx.response_raw[11] = ctx.raw_request[3]
 
-    return rsp_bytes
+    ctx.response_raw[12] = ctx.response.opaque[0]
+    ctx.response_raw[13] = ctx.response.opaque[1]
+    ctx.response_raw[14] = ctx.response.opaque[2]
+    ctx.response_raw[15] = ctx.response.opaque[3]
+
+    binary.BigEndian.PutUint64(ctx.raw_request, uint64(ctx.response.cas))
+    ctx.response_raw[16] = ctx.raw_request[0]
+    ctx.response_raw[17] = ctx.raw_request[1]
+    ctx.response_raw[18] = ctx.raw_request[2]
+    ctx.response_raw[19] = ctx.raw_request[3]
+    ctx.response_raw[20] = ctx.raw_request[4]
+    ctx.response_raw[21] = ctx.raw_request[5]
+    ctx.response_raw[22] = ctx.raw_request[6]
+    ctx.response_raw[23] = ctx.raw_request[7]
+    if log.GetLevel() == log.DebugLevel {
+        log.Debugf("Magic:  0x%02x\n", ctx.response_raw[0])
+        log.Debugf("Opcode: 0x%02x\n", ctx.response_raw[1])
+        log.Debugf("KeyLen: 0x%04x\n", ctx.response_raw[2:4])
+        log.Debugf("Extra:  0x%02x\n", ctx.response_raw[4])
+        log.Debugf("DType:  0x%02x\n", ctx.response_raw[5])
+        log.Debugf("Status: 0x%04x\n", ctx.response_raw[6:8])
+        log.Debugf("BodyL:  0x%08x\n", ctx.response_raw[8:12])
+        log.Debugf("Opaque: 0x%08x\n", ctx.response_raw[12:16])
+        log.Debugf("CAS:    0x%016x\n\n", ctx.response_raw[16:24])
+    }
 }

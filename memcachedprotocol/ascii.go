@@ -4,55 +4,76 @@ import (
 	"bufio"
 	"fmt"
 	"io"
-	"log"
 	"nefelim4ag/go-memcached-server/memstore"
 	"os"
 	"strconv"
 	"strings"
 	"time"
+
+	log "github.com/sirupsen/logrus"
 )
 
-func sendError(client *bufio.Writer) error {
-	client.Write([]byte("ERROR\r\n"))
-	client.Flush()
+type ASCIIProcessor struct {
+    store *memstore.SharedStore[string, MemcachedEntry]
+    rb    *bufio.Reader
+    wb    *bufio.Writer
+}
+
+func CreateASCIIProcessor(rb *bufio.Reader, wb *bufio.Writer, store *memstore.SharedStore[string, MemcachedEntry]) *ASCIIProcessor {
+    return &ASCIIProcessor{
+        store:        store,
+        rb:           rb,
+        wb:           wb,
+    }
+}
+
+func (ctx *ASCIIProcessor) sendEnd() error {
+	ctx.wb.Write([]byte("END\r\n"))
 
 	return nil
 }
 
-func sendClientError(client *bufio.Writer, msg string) error {
-	client.Write([]byte(fmt.Sprintf("CLIENT_ERROR %s\r\n", msg)))
-	client.Flush()
+func (ctx *ASCIIProcessor) sendError() error {
+	ctx.wb.Write([]byte("ERROR\r\n"))
+
+	return nil
+}
+
+func (ctx *ASCIIProcessor) sendClientError(msg string) error {
+	ctx.wb.Write([]byte(fmt.Sprintf("CLIENT_ERROR %s\r\n", msg)))
 
 	return fmt.Errorf("CLIENT_ERROR %s", msg)
 }
 
-func sendServerError(client *bufio.Writer, msg string) error {
-	client.Write([]byte(fmt.Sprintf("SERVER_ERROR %s\r\n", msg)))
-	client.Flush()
+func (ctx *ASCIIProcessor) sendServerError(msg string) error {
+	ctx.wb.Write([]byte(fmt.Sprintf("SERVER_ERROR %s\r\n", msg)))
 
 	return fmt.Errorf("SERVER_ERROR %s", msg)
 }
 
-func CommandAscii(magic byte, client *bufio.ReadWriter, store *memstore.SharedStore) error {
-		request, err := client.Reader.ReadString('\n')
+func (ctx *ASCIIProcessor) CommandAscii() error {
+		request, err := ctx.rb.ReadString('\n')
 		if err != nil {
             return err
         }
 
+		defer ctx.wb.Flush()
+
 		request = strings.TrimSpace(request)
 		request_parsed := strings.Split(request, " ")
-		command := string(magic) + request_parsed[0]
+		command := request_parsed[0]
 		args := request_parsed[1:]
 
-		log.Println(command, args)
+		if log.GetLevel() == log.DebugLevel {
+			log.Debugf("cmd: %s %s", command, args)
+		}
 
 		switch command {
 		case "quit":
 			return fmt.Errorf("quit")
 
 		case "version":
-			client.Writer.Write([]byte("VERSION 1.6.2\r\n"))
-			client.Writer.Flush()
+			ctx.wb.Write([]byte("VERSION 1.6.2\r\n"))
 			return nil
 
 		case "verbosity":
@@ -62,130 +83,115 @@ func CommandAscii(magic byte, client *bufio.ReadWriter, store *memstore.SharedSt
 				}
 				switch args[0] {
 				case "0", "1":
-					client.Writer.Write([]byte("OK\r\n"))
-					client.Writer.Flush()
+					ctx.wb.Write([]byte("OK\r\n"))
 					return nil
 				}
 			}
-			return sendError(client.Writer)
+			return ctx.sendError()
 
 		case "set", "add", "replace":
-			return set_add_replace(command, args, client, store)
+			return ctx.set_add_replace(command, args)
 
 		case "append", "prepend":
-			return append_prepend(command, args, client, store)
+			return ctx.append_prepend(command, args)
 
 		case "cas":
-			return cas(args, client, store)
+			return ctx.cas(args)
 
 		case "get", "gets":
 			if len(args) == 0 {
-				return sendError(client.Writer)
+				return ctx.sendError()
 			}
 
 			for _, v := range args {
-				value, exist := store.Get(v)
+				value, exist := ctx.store.Get(v)
 				if !exist {
 					continue
 				}
-				var entry memcachedEntry = value.(memcachedEntry)
+				var entry MemcachedEntry = *value
 				// VALUE <key> <flags> <bytes> [<cas unique>]\r\n
 				// <data block>\r\n
 				if command == "get" {
 					resp := fmt.Sprintf("VALUE %s %d %d\r\n", entry.key, entry.flags, entry.len)
-					client.Writer.Write([]byte(resp))
+					ctx.wb.Write([]byte(resp))
 				} else {
 					resp := fmt.Sprintf("VALUE %s %d %d %d\r\n", entry.key, entry.flags, entry.len, entry.cas)
-					client.Writer.Write([]byte(resp))
+					ctx.wb.Write([]byte(resp))
 				}
-				client.Writer.Write(entry.value)
-				client.Writer.Write([]byte("\r\n"))
+				ctx.wb.Write(entry.value)
+				ctx.wb.Write([]byte("\r\n"))
 			}
 
-			client.Writer.Write([]byte("END\r\n"))
-			client.Writer.Flush()
-
-			return nil
+			return ctx.sendEnd()
 		case "delete": //delete <key> [noreply]\r\n
 		    switch len(args) {
 			case 0:
-				return sendError(client.Writer)
+				return ctx.sendError()
 			case 1:
 				key := args[0]
-				_, exist := store.Get(key)
+				_, exist := ctx.store.Get(key)
 				if !exist{
-					client.Writer.Write([]byte("NOT_FOUND\r\n"))
-					client.Writer.Flush()
+					ctx.wb.Write([]byte("NOT_FOUND\r\n"))
 					return nil
 				}
 
-				store.Delete(key)
-				client.Writer.Write([]byte("DELETED\r\n"))
-				client.Writer.Flush()
+				ctx.store.Delete(key)
+				ctx.wb.Write([]byte("DELETED\r\n"))
 			default:
 				if args[1] != "noreply" || len(args) > 2 {
-                    sendError(client.Writer)
+                    ctx.sendError()
                 }
 				key := args[0]
-				store.Delete(key)
+				ctx.store.Delete(key)
 			}
 
 			return nil
 
 		// incr|decr <key> <value> [noreply]\r\n
 		case "incr", "decr":
-			return incr_decr(command, args, client, store)
+			return ctx.incr_decr(command, args)
 
 		case "flush_all":
-			store.Flush()
+			ctx.store.Flush()
 			if len(args) > 0 && args[len(args) - 1] == "noreply" {
 				return nil
 			}
-			client.Writer.Write([]byte("OK\r\n"))
-			client.Writer.Flush()
+			ctx.wb.Write([]byte("OK\r\n"))
 			return nil
 		case "stats":
-			return stats(args, client, store)
+			return ctx.stats(args)
 
 		default:
-			return sendError(client.Writer)
+			return ctx.sendError()
 		}
 
 		// err = HandleCommand(clientRequest, client)
 		// if err!= nil {
-		// 	log.Println(clientRequest, err)
-		// 	client.Writer.Write([]byte("ERROR\r\n"))
-		// 	client.Writer.Flush()
+		// 	// log.Println(clientRequest, err)
+		// 	ctx.wb.Write([]byte("ERROR\r\n"))
 		// 	return err
 		// }
 }
 
-type memcachedEntry struct {
-	key string
-	flags uint32
-	exptime uint32
-	len uint32
-	cas uint64
-	value []byte
-}
+
 
 // <command name> <key> <flags> <exptime> <bytes> [noreply]\r\n
-func set_add_replace(command string, args []string, client *bufio.ReadWriter, store *memstore.SharedStore) error {
+func (ctx *ASCIIProcessor) set_add_replace(command string, args []string) error {
 	key := args[0]
 	flags, err := strconv.ParseUint(args[1], 10, 32)
 	if err != nil {
-		return sendClientError(client.Writer, err.Error())
+		return ctx.sendClientError(err.Error())
 	}
 	exptime, err := strconv.ParseUint(args[2], 10, 32)
 	if err != nil {
-		return sendClientError(client.Writer, err.Error())
+		return ctx.sendClientError(err.Error())
 	}
 	bytes, err := strconv.ParseUint(args[3], 10, 32)
 	if err!= nil {
-		return sendClientError(client.Writer, err.Error())
+		return ctx.sendClientError(err.Error())
 	}
 
-	entry := memcachedEntry{
+	entry := MemcachedEntry{
 		key: key,
 		flags: uint32(flags),
 		exptime: uint32(exptime),
@@ -195,23 +201,22 @@ func set_add_replace(command string, args []string, client *bufio.ReadWriter, st
 	}
 
 	if bytes > 0 {
-		_, err := io.ReadFull(client.Reader, entry.value)
+		_, err := io.ReadFull(ctx.rb, entry.value)
 		if err != nil {
-			return sendClientError(client.Writer, err.Error())
+			return ctx.sendClientError(err.Error())
 		}
 	}
 	// Read message last \r\n possibly
-	client.Reader.ReadString('\n')
+	ctx.rb.ReadString('\n')
 
-	_, exist := store.Get(key)
+	_, exist := ctx.store.Get(key)
 	switch command {
 		case "add":
 			if exist {
 				if args[len(args) - 1] == "noreply" {
 					return nil
 				}
-				client.Writer.Write([]byte("NOT_STORED\r\n"))
-				client.Writer.Flush()
+				ctx.wb.Write([]byte("NOT_STORED\r\n"))
 				return nil
 			}
 		case "replace":
@@ -219,44 +224,42 @@ func set_add_replace(command string, args []string, client *bufio.ReadWriter, st
                 if args[len(args) - 1] == "noreply" {
                     return nil
                 }
-                client.Writer.Write([]byte("NOT_STORED\r\n"))
-                client.Writer.Flush()
+                ctx.wb.Write([]byte("NOT_STORED\r\n"))
                 return nil
             }
     }
 
-	err = store.Set(entry.key, entry, uint64(entry.len))
+	err = ctx.store.Set(entry.key, entry, uint64(entry.len))
 	if err!= nil {
-		return sendClientError(client.Writer, err.Error())
+		return ctx.sendClientError(err.Error())
 	}
 
 	if args[len(args) - 1] == "noreply" {
 		return nil
 	}
 
-	client.Writer.Write([]byte("STORED\r\n"))
-	client.Writer.Flush()
+	ctx.wb.Write([]byte("STORED\r\n"))
 
 	return nil
 }
 
 // <command name> <key> <flags> <exptime> <bytes> [noreply]\r\n
-func append_prepend(command string, args []string, client *bufio.ReadWriter, store *memstore.SharedStore) error {
+func (ctx *ASCIIProcessor) append_prepend(command string, args []string) error {
 	key := args[0]
 	flags, err := strconv.ParseUint(args[1], 10, 32)
 	if err != nil {
-		return sendClientError(client.Writer, err.Error())
+		return ctx.sendClientError(err.Error())
 	}
 	exptime, err := strconv.ParseUint(args[2], 10, 32)
 	if err != nil {
-		return sendClientError(client.Writer, err.Error())
+		return ctx.sendClientError(err.Error())
 	}
 	bytes, err := strconv.ParseUint(args[3], 10, 64)
 	if err!= nil {
-		return sendClientError(client.Writer, err.Error())
+		return ctx.sendClientError(err.Error())
 	}
 
-	entry := memcachedEntry{
+	entry := MemcachedEntry{
 		key: key,
 		flags: uint32(flags),
 		exptime: uint32(exptime),
@@ -266,75 +269,77 @@ func append_prepend(command string, args []string, client *bufio.ReadWriter, sto
 	}
 
 	if bytes > 0 {
-		_, err := io.ReadFull(client.Reader, entry.value)
+		_, err := io.ReadFull(ctx.rb, entry.value)
 		if err != nil {
-			return sendClientError(client.Writer, err.Error())
+			return ctx.sendClientError(err.Error())
 		}
 	}
 	// Read message last \r\n possibly
-	client.Reader.ReadString('\n')
+	ctx.rb.ReadString('\n')
 
-	v, exist := store.Get(key)
+	v, exist := ctx.store.Get(key)
 	if !exist {
 		if args[len(args) - 1] == "noreply" {
 			return nil
 		}
-		client.Writer.Write([]byte("NOT_STORED\r\n"))
-		client.Writer.Flush()
+		ctx.wb.Write([]byte("NOT_STORED\r\n"))
 		return nil
 	}
 
-	entry.flags = v.(memcachedEntry).flags
-	entry.exptime = v.(memcachedEntry).exptime
+	entry.flags = v.flags
+	entry.exptime = v.exptime
 
 	switch command {
 		case "append":
-			old_data := v.(memcachedEntry).value
+			old_data := v.value
 			new_data := entry.value
 			entry.value = append(old_data, new_data[:]...)
 		case "prepend":
-			old_data := v.(memcachedEntry).value
+			old_data := v.value
 			new_data := entry.value
 			entry.value = append(new_data, old_data[:]...)
     }
 	entry.len = uint32(len(entry.value))
 
-	err = store.Set(entry.key, entry, uint64(entry.len))
+	err = ctx.store.Set(entry.key, entry, uint64(entry.len))
 	if err!= nil {
-		return sendClientError(client.Writer, err.Error())
+		return ctx.sendClientError(err.Error())
 	}
 
 	if args[len(args) - 1] == "noreply" {
 		return nil
 	}
 
-	client.Writer.Write([]byte("STORED\r\n"))
-	client.Writer.Flush()
+	ctx.wb.Write([]byte("STORED\r\n"))
 
 	return nil
 }
 
 // cas <key> <flags> <exptime> <bytes> <cas unique> [noreply]\r\n
-func cas(args []string, client *bufio.ReadWriter, store *memstore.SharedStore) error {
+func (ctx *ASCIIProcessor) cas(args []string) error {
+	if len(args) < 5 {
+		return ctx.sendClientError(fmt.Sprintf("not enough arguments"))
+	}
+
 	key := args[0]
 	flags, err := strconv.ParseUint(args[1], 10, 32)
 	if err != nil {
-		return sendClientError(client.Writer, err.Error())
+		return ctx.sendClientError(err.Error())
 	}
 	exptime, err := strconv.ParseUint(args[2], 10, 32)
 	if err != nil {
-		return sendClientError(client.Writer, err.Error())
+		return ctx.sendClientError(err.Error())
 	}
 	bytes, err := strconv.ParseUint(args[3], 10, 32)
 	if err!= nil {
-		return sendClientError(client.Writer, err.Error())
+		return ctx.sendClientError(err.Error())
 	}
 	cas, err := strconv.ParseUint(args[4], 10, 64)
 	if err!= nil {
-		return sendClientError(client.Writer, err.Error())
+		return ctx.sendClientError(err.Error())
 	}
 
-	entry := memcachedEntry{
+	entry := MemcachedEntry{
 		key: key,
 		flags: uint32(flags),
 		exptime: uint32(exptime),
@@ -344,69 +349,65 @@ func cas(args []string, client *bufio.ReadWriter, store *memstore.SharedStore) e
 	}
 
 	if bytes > 0 {
-		_, err := io.ReadFull(client.Reader, entry.value)
+		_, err := io.ReadFull(ctx.rb, entry.value)
 		if err != nil {
-			return sendClientError(client.Writer, err.Error())
+			return ctx.sendClientError(err.Error())
 		}
 	}
 	// Read message last \r\n possibly
-	client.Reader.ReadString('\n')
+	ctx.rb.ReadString('\n')
 
 	// Racy implementation item can be modified between get & set
-	v, exist := store.Get(key)
+	v, exist := ctx.store.Get(key)
 	if !exist {
 		if args[len(args) - 1] == "noreply" {
 			return nil
 		}
 
-		client.Writer.Write([]byte("NOT_FOUND\r\n"))
-		client.Writer.Flush()
+		ctx.wb.Write([]byte("NOT_FOUND\r\n"))
 		return nil
 	}
 
-	if v.(memcachedEntry).cas != cas {
+	if v.cas != cas {
 		if args[len(args) - 1] == "noreply" {
 			return nil
 		}
 
-		client.Writer.Write([]byte("EXISTS\r\n"))
-		client.Writer.Flush()
+		ctx.wb.Write([]byte("EXISTS\r\n"))
 		return nil
 	}
 
-	err = store.Set(entry.key, entry, uint64(entry.len))
+	err = ctx.store.Set(entry.key, entry, uint64(entry.len))
 	if err!= nil {
-		return sendClientError(client.Writer, err.Error())
+		return ctx.sendClientError(err.Error())
 	}
 
 	if args[len(args) - 1] == "noreply" {
 		return nil
 	}
 
-	client.Writer.Write([]byte("STORED\r\n"))
-	client.Writer.Flush()
+	ctx.wb.Write([]byte("STORED\r\n"))
 
 	return nil
 }
 
-func incr_decr(command string, args []string, client *bufio.ReadWriter, store *memstore.SharedStore) error {
+func (ctx *ASCIIProcessor) incr_decr(command string, args []string) error {
 	key := args[0]
 	change, err := strconv.ParseUint(args[1], 10, 64)
 	if err!= nil {
-		return sendClientError(client.Writer, err.Error())
+		return ctx.sendClientError(err.Error())
 	}
 
-	_v, exist := store.Get(key)
+	_v, exist := ctx.store.Get(key)
 	if !exist {
-		client.Writer.Write([]byte("NOT_FOUND\r\n"))
-		client.Writer.Flush()
+		ctx.wb.Write([]byte("NOT_FOUND\r\n"))
 		return nil
 	}
 
-	v := _v.(memcachedEntry)
+	v := _v
 	old_value, err := strconv.ParseUint(string(v.value), 10, 64)
 	if err!= nil {
-		return sendClientError(client.Writer, err.Error())
+		return ctx.sendClientError(err.Error())
 	}
 
 	const MaxUint = ^uint64(0)
@@ -429,32 +430,29 @@ func incr_decr(command string, args []string, client *bufio.ReadWriter, store *m
 
 	v.value = []byte(fmt.Sprintf("%d", new_value))
 	v.len = uint32(len(v.value))
-	store.Set(key, v, uint64(v.len))
+	ctx.store.Set(key, *v, uint64(v.len))
 
 	if args[len(args) - 1] == "noreply" {
 		return nil
 	}
 
-	client.Writer.Write([]byte(fmt.Sprintf("%d\r\n", new_value)))
-	client.Writer.Flush()
+	ctx.wb.Write([]byte(fmt.Sprintf("%d\r\n", new_value)))
 
 	return nil
 }
 
-func stats(args []string, client *bufio.ReadWriter, store *memstore.SharedStore) error {
+func (ctx *ASCIIProcessor) stats(args []string) error {
 	if len(args) == 0 {
-		client.Writer.Write([]byte(fmt.Sprintf("STAT pid %d\r\n", os.Getpid())))
+		ctx.wb.Write([]byte(fmt.Sprintf("STAT pid %d\r\n", os.Getpid())))
 		// STAT uptime 6710
-		client.Writer.Write([]byte(fmt.Sprintf("STAT time %d\r\n", time.Now().Unix())))
-		client.Writer.Write([]byte("STAT version 1.6.19\r\n"))
-		client.Writer.Write([]byte("END\r\n"))
-        client.Writer.Flush()
-        return nil
+		ctx.wb.Write([]byte(fmt.Sprintf("STAT time %d\r\n", time.Now().Unix())))
+		ctx.wb.Write([]byte("STAT version 1.6.19\r\n"))
+        return ctx.sendError()
 	}
 
 	switch args[0] {
 	case "noreply":
-		return sendError(client.Writer)
+		return ctx.sendError()
 	case "items":
 		return fmt.Errorf("not supported")
 	case "slabs":
@@ -567,13 +565,13 @@ func stats(args []string, client *bufio.ReadWriter, store *memstore.SharedStore)
 // 		}
 
 // 		_v, exist := store.Get(key)
-// 		v := _v.(memcachedEntry)
+// 		v := _v.(MemcachedEntry)
 // 		if exptime > 0 && exist {
 // 			v.exptime = uint32(exptime)
 // 			store.Set(key, v, v.len)
-// 			client.Writer.Write([]byte("TOUCHED\r\n"))
+// 			ctx.wb.Write([]byte("TOUCHED\r\n"))
 // 		} else {
-// 			client.Writer.Write([]byte("NOT_FOUND\r\n"))
+// 			ctx.wb.Write([]byte("NOT_FOUND\r\n"))
 // 		}
 
 // 	case "lru_crawler":
@@ -584,7 +582,7 @@ func stats(args []string, client *bufio.ReadWriter, store *memstore.SharedStore)
 // 				// key=fake%2Fee49a9a0d462d1fa%2F18a6af34196%3A18a6af34253%3Afa5766e2 exp=1694013261 la=1694012361 cas=12434 fetch=no cls=12 size=1139
 // 				// key=fake%2F886f3db85b3da0c2%2F18a6af60139%3A18a6af60c05%3A97e2dba9 exp=1694013435 la=1694012535 cas=12440 fetch=no cls=13 size=1420
 // 				// key=fake%2Fc437f5f7aa7cb20b%2F18a6b03682a%3A18a6b03be70%3A123ad4e4 exp=1694013435 la=1694012535 cas=12439 fetch=no cls=39 size=1918339
-// 				client.Writer.Write([]byte("END\r\n"))
+// 				ctx.wb.Write([]byte("END\r\n"))
 // 			default:
 //                 return fmt.Errorf("not supported")
 // 			}
