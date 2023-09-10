@@ -260,7 +260,6 @@ func (s *SharedStore) LRUCrawler() {
 				shard.evictItem()
 			}
 		}
-		runtime.GC()
 
 		time.Sleep(time.Second)
 	}
