@@ -139,7 +139,7 @@ type ResponseHeader struct {
 }
 
 type BinaryProcessor struct {
-    store *memstore.SharedStore[MemcachedEntry]
+    store *memstore.SharedStore
     rb    *bufio.Reader
     wb    *bufio.Writer
     // cw    chan  *[]byte
@@ -153,7 +153,7 @@ type BinaryProcessor struct {
     key          []byte
 }
 
-func CreateBinaryProcessor(rb *bufio.Reader, wb *bufio.Writer, store *memstore.SharedStore[MemcachedEntry]) *BinaryProcessor {
+func CreateBinaryProcessor(rb *bufio.Reader, wb *bufio.Writer, store *memstore.SharedStore) *BinaryProcessor {
     return &BinaryProcessor{
         store:        store,
         rb:           rb,
@@ -226,39 +226,40 @@ func (ctx *BinaryProcessor) CommandBinary() error {
             log.Debugf("Key:    %s\n\n", key)
         }
 
-        entry := MemcachedEntry{
-            key:     string(key[:]),
-            flags:   binary.BigEndian.Uint32(flags),
-            exptime: binary.BigEndian.Uint32(exptime),
-            len:     bodyLen,
-            cas:     uint64(time.Now().UnixNano()),
-            value:   value,
+        entry := memstore.MEntry{
+            Key:     string(key[:]),
+            Flags:   binary.BigEndian.Uint32(flags),
+            ExpTime: binary.BigEndian.Uint32(exptime),
+            Size:     bodyLen,
+            Cas:     uint64(time.Now().UnixNano()),
+            Value:   value,
         }
 
         if ctx.request.cas != 0 {
-            v, ok := ctx.store.Get(entry.key)
-            if ok && ctx.request.cas != v.cas {
+            _v, ok := ctx.store.Get(entry.Key)
+            v := *_v
+            if ok && ctx.request.cas != v.Cas {
                 ctx.response.status = Exist
                 return ctx.Response()
             }
         }
 
         if ctx.request.opcode == Add || ctx.request.opcode == AddQ {
-            _, ok := ctx.store.Get(entry.key)
+            _, ok := ctx.store.Get(entry.Key)
             if ok {
                 ctx.response.status = Exist
-                // v := _v.(MemcachedEntry)
+                // v := _v.(memstore.MEntry)
                 ctx.Response()
                 // ctx.wb.Write(v.value)
                 return nil
             }
         }
 
-        err = ctx.store.Set(entry.key, entry, uint64(entry.len))
+        err = ctx.store.Set(entry.Key, &entry, entry.Size)
         if err != nil {
             return err
         }
-        ctx.response.cas = entry.cas
+        ctx.response.cas = entry.Cas
 
         if ctx.request.opcode == SetQ || ctx.request.opcode == AddQ {
             return nil
@@ -288,15 +289,15 @@ func (ctx *BinaryProcessor) CommandBinary() error {
         }
         v := _v
 
-        ctx.response.cas = v.cas
+        ctx.response.cas = v.Cas
         ctx.response.extrasLen = 4
-        ctx.response.totalBody = 4 + uint32(len(v.value))
-        flags := flagsType(v.flags).Bytes()
+        ctx.response.totalBody = 4 + uint32(len(v.Value))
+        flags := flagsType(v.Flags).Bytes()
 
         ctx.Response()
         ctx.wb.Write(flags)
         //ctx.cw <- &flags
-        ctx.wb.Write(v.value)
+        ctx.wb.Write(v.Value)
         //ctx.cw <- &v.value
 
         return nil

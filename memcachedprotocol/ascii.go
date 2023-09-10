@@ -14,12 +14,12 @@ import (
 )
 
 type ASCIIProcessor struct {
-    store *memstore.SharedStore[MemcachedEntry]
+    store *memstore.SharedStore
     rb    *bufio.Reader
     wb    *bufio.Writer
 }
 
-func CreateASCIIProcessor(rb *bufio.Reader, wb *bufio.Writer, store *memstore.SharedStore[MemcachedEntry]) *ASCIIProcessor {
+func CreateASCIIProcessor(rb *bufio.Reader, wb *bufio.Writer, store *memstore.SharedStore) *ASCIIProcessor {
     return &ASCIIProcessor{
         store:        store,
         rb:           rb,
@@ -104,21 +104,21 @@ func (ctx *ASCIIProcessor) CommandAscii() error {
 			}
 
 			for _, v := range args {
-				value, exist := ctx.store.Get(v)
+				entry, exist := ctx.store.Get(v)
 				if !exist {
 					continue
 				}
-				var entry MemcachedEntry = *value
-				// VALUE <key> <flags> <bytes> [<cas unique>]\r\n
+
+				// VALUE <key> <Flags> <bytes> [<cas unique>]\r\n
 				// <data block>\r\n
 				if command == "get" {
-					resp := fmt.Sprintf("VALUE %s %d %d\r\n", entry.key, entry.flags, entry.len)
+					resp := fmt.Sprintf("VALUE %s %d %d\r\n", entry.Key, entry.Flags, entry.Size)
 					ctx.wb.Write([]byte(resp))
 				} else {
-					resp := fmt.Sprintf("VALUE %s %d %d %d\r\n", entry.key, entry.flags, entry.len, entry.cas)
+					resp := fmt.Sprintf("VALUE %s %d %d %d\r\n", entry.Key, entry.Flags, entry.Size, entry.Cas)
 					ctx.wb.Write([]byte(resp))
 				}
-				ctx.wb.Write(entry.value)
+				ctx.wb.Write(entry.Value)
 				ctx.wb.Write([]byte("\r\n"))
 			}
 
@@ -175,33 +175,33 @@ func (ctx *ASCIIProcessor) CommandAscii() error {
 
 
 
-// <command name> <key> <flags> <exptime> <bytes> [noreply]\r\n
+// <command name> <key> <Flags> <ExpTime> <bytes> [noreply]\r\n
 func (ctx *ASCIIProcessor) set_add_replace(command string, args []string) error {
 	key := args[0]
-	flags, err := strconv.ParseUint(args[1], 10, 32)
+	Flags, err := strconv.ParseUint(args[1], 10, 32)
 	if err != nil {
 		return ctx.sendClientError(err.Error())
 	}
-	exptime, err := strconv.ParseUint(args[2], 10, 32)
+	ExpTime, err := strconv.ParseUint(args[2], 10, 32)
 	if err != nil {
 		return ctx.sendClientError(err.Error())
 	}
-	bytes, err := strconv.ParseUint(args[3], 10, 32)
+	nbytes, err := strconv.ParseUint(args[3], 10, 32)
 	if err!= nil {
 		return ctx.sendClientError(err.Error())
 	}
 
-	entry := MemcachedEntry{
-		key: key,
-		flags: uint32(flags),
-		exptime: uint32(exptime),
-		len: uint32(bytes),
-		cas: uint64(time.Now().UnixNano()),
-		value: make([]byte, bytes),
+	entry := memstore.MEntry{
+		Key: key,
+		Flags: uint32(Flags),
+		ExpTime: uint32(ExpTime),
+		Size: uint32(nbytes),
+		Cas: uint64(time.Now().UnixNano()),
+		Value: make([]byte, nbytes),
 	}
 
-	if bytes > 0 {
-		_, err := io.ReadFull(ctx.rb, entry.value)
+	if nbytes > 0 {
+		_, err := io.ReadFull(ctx.rb, entry.Value)
 		if err != nil {
 			return ctx.sendClientError(err.Error())
 		}
@@ -229,7 +229,7 @@ func (ctx *ASCIIProcessor) set_add_replace(command string, args []string) error 
             }
     }
 
-	err = ctx.store.Set(entry.key, entry, uint64(entry.len))
+	err = ctx.store.Set(entry.Key, &entry, entry.Size)
 	if err!= nil {
 		return ctx.sendClientError(err.Error())
 	}
@@ -243,33 +243,33 @@ func (ctx *ASCIIProcessor) set_add_replace(command string, args []string) error 
 	return nil
 }
 
-// <command name> <key> <flags> <exptime> <bytes> [noreply]\r\n
+// <command name> <key> <Flags> <ExpTime> <bytes> [noreply]\r\n
 func (ctx *ASCIIProcessor) append_prepend(command string, args []string) error {
 	key := args[0]
-	flags, err := strconv.ParseUint(args[1], 10, 32)
+	Flags, err := strconv.ParseUint(args[1], 10, 32)
 	if err != nil {
 		return ctx.sendClientError(err.Error())
 	}
-	exptime, err := strconv.ParseUint(args[2], 10, 32)
+	ExpTime, err := strconv.ParseUint(args[2], 10, 32)
 	if err != nil {
 		return ctx.sendClientError(err.Error())
 	}
-	bytes, err := strconv.ParseUint(args[3], 10, 64)
+	nbytes, err := strconv.ParseUint(args[3], 10, 64)
 	if err!= nil {
 		return ctx.sendClientError(err.Error())
 	}
 
-	entry := MemcachedEntry{
-		key: key,
-		flags: uint32(flags),
-		exptime: uint32(exptime),
-		len: uint32(bytes),
-		cas: uint64(time.Now().UnixNano()),
-		value: make([]byte, bytes),
+	entry := memstore.MEntry{
+		Key: key,
+		Flags: uint32(Flags),
+		ExpTime: uint32(ExpTime),
+		Size: uint32(nbytes),
+		Cas: uint64(time.Now().UnixNano()),
+		Value: make([]byte, nbytes),
 	}
 
-	if bytes > 0 {
-		_, err := io.ReadFull(ctx.rb, entry.value)
+	if nbytes > 0 {
+		_, err := io.ReadFull(ctx.rb, entry.Value)
 		if err != nil {
 			return ctx.sendClientError(err.Error())
 		}
@@ -286,22 +286,22 @@ func (ctx *ASCIIProcessor) append_prepend(command string, args []string) error {
 		return nil
 	}
 
-	entry.flags = v.flags
-	entry.exptime = v.exptime
+	entry.Flags = v.Flags
+	entry.ExpTime = v.ExpTime
 
 	switch command {
 		case "append":
-			old_data := v.value
-			new_data := entry.value
-			entry.value = append(old_data, new_data[:]...)
+			old_data := v.Value
+			new_data := entry.Value
+			entry.Value = append(old_data, new_data[:]...)
 		case "prepend":
-			old_data := v.value
-			new_data := entry.value
-			entry.value = append(new_data, old_data[:]...)
+			old_data := v.Value
+			new_data := entry.Value
+			entry.Value = append(new_data, old_data[:]...)
     }
-	entry.len = uint32(len(entry.value))
+	entry.Size = uint32(len(entry.Value))
 
-	err = ctx.store.Set(entry.key, entry, uint64(entry.len))
+	err = ctx.store.Set(entry.Key, &entry, entry.Size)
 	if err!= nil {
 		return ctx.sendClientError(err.Error())
 	}
@@ -315,18 +315,18 @@ func (ctx *ASCIIProcessor) append_prepend(command string, args []string) error {
 	return nil
 }
 
-// cas <key> <flags> <exptime> <bytes> <cas unique> [noreply]\r\n
+// cas <key> <Flags> <ExpTime> <bytes> <cas unique> [noreply]\r\n
 func (ctx *ASCIIProcessor) cas(args []string) error {
 	if len(args) < 5 {
-		return ctx.sendClientError(fmt.Sprintf("not enough arguments"))
+		return ctx.sendClientError("not enough arguments for cas")
 	}
 
 	key := args[0]
-	flags, err := strconv.ParseUint(args[1], 10, 32)
+	Flags, err := strconv.ParseUint(args[1], 10, 32)
 	if err != nil {
 		return ctx.sendClientError(err.Error())
 	}
-	exptime, err := strconv.ParseUint(args[2], 10, 32)
+	ExpTime, err := strconv.ParseUint(args[2], 10, 32)
 	if err != nil {
 		return ctx.sendClientError(err.Error())
 	}
@@ -339,17 +339,17 @@ func (ctx *ASCIIProcessor) cas(args []string) error {
 		return ctx.sendClientError(err.Error())
 	}
 
-	entry := MemcachedEntry{
-		key: key,
-		flags: uint32(flags),
-		exptime: uint32(exptime),
-		len: uint32(bytes),
-		cas: uint64(time.Now().UnixNano()),
-		value: make([]byte, bytes),
+	entry := memstore.MEntry{
+		Key: key,
+		Flags: uint32(Flags),
+		ExpTime: uint32(ExpTime),
+		Size: uint32(bytes),
+		Cas: uint64(time.Now().UnixNano()),
+		Value: make([]byte, bytes),
 	}
 
 	if bytes > 0 {
-		_, err := io.ReadFull(ctx.rb, entry.value)
+		_, err := io.ReadFull(ctx.rb, entry.Value)
 		if err != nil {
 			return ctx.sendClientError(err.Error())
 		}
@@ -368,7 +368,7 @@ func (ctx *ASCIIProcessor) cas(args []string) error {
 		return nil
 	}
 
-	if v.cas != cas {
+	if v.Cas != cas {
 		if args[len(args) - 1] == "noreply" {
 			return nil
 		}
@@ -377,7 +377,7 @@ func (ctx *ASCIIProcessor) cas(args []string) error {
 		return nil
 	}
 
-	err = ctx.store.Set(entry.key, entry, uint64(entry.len))
+	err = ctx.store.Set(entry.Key, &entry, entry.Size)
 	if err!= nil {
 		return ctx.sendClientError(err.Error())
 	}
@@ -405,7 +405,7 @@ func (ctx *ASCIIProcessor) incr_decr(command string, args []string) error {
 	}
 
 	v := _v
-	old_value, err := strconv.ParseUint(string(v.value), 10, 64)
+	old_value, err := strconv.ParseUint(string(v.Value), 10, 64)
 	if err!= nil {
 		return ctx.sendClientError(err.Error())
 	}
@@ -428,9 +428,9 @@ func (ctx *ASCIIProcessor) incr_decr(command string, args []string) error {
 		}
 	}
 
-	v.value = []byte(fmt.Sprintf("%d", new_value))
-	v.len = uint32(len(v.value))
-	ctx.store.Set(key, *v, uint64(v.len))
+	v.Value = []byte(fmt.Sprintf("%d", new_value))
+	v.Size = uint32(len(v.Value))
+	ctx.store.Set(key, v, uint32(v.Size))
 
 	if args[len(args) - 1] == "noreply" {
 		return nil
@@ -557,17 +557,17 @@ func (ctx *ASCIIProcessor) stats(args []string) error {
 
 // 	switch command {
 
-// 	case "touch": //touch <key> <exptime> [noreply]\r\n
+// 	case "touch": //touch <key> <ExpTime> [noreply]\r\n
 // 		key := args[0]
-// 		exptime, err := strconv.ParseUint(args[1], 10, 32)
+// 		ExpTime, err := strconv.ParseUint(args[1], 10, 32)
 // 		if err != nil {
 // 			return err
 // 		}
 
 // 		_v, exist := store.Get(key)
 // 		v := _v.(MemcachedEntry)
-// 		if exptime > 0 && exist {
-// 			v.exptime = uint32(exptime)
+// 		if ExpTime > 0 && exist {
+// 			v.ExpTime = uint32(ExpTime)
 // 			store.Set(key, v, v.len)
 // 			ctx.wb.Write([]byte("TOUCHED\r\n"))
 // 		} else {

@@ -20,7 +20,7 @@ import (
 )
 
 var (
-	store *memstore.SharedStore[memcachedprotocol.MemcachedEntry]
+	store *memstore.SharedStore
 )
 
 func ConnectionHandler(conn *net.TCPConn, wg *sync.WaitGroup, err error) {
@@ -33,8 +33,8 @@ func ConnectionHandler(conn *net.TCPConn, wg *sync.WaitGroup, err error) {
 	defer wg.Done()
 	defer conn.Close()
 
-	_r := bufio.NewReader(conn)
-	_w := bufio.NewWriter(conn)
+	_r := bufio.NewReaderSize(conn, 64 * 1024)
+	_w := bufio.NewWriterSize(conn, 64 * 1024)
 
 	// Reuse context between binary commands
 	binaryProcessor := memcachedprotocol.CreateBinaryProcessor(_r, _w, store)
@@ -78,7 +78,7 @@ func main() {
     log.SetLevel(log.DebugLevel)
 
 	_memstore_size := flag.Uint64("m", 512, "items memory in megabytes, default is 512")
-	_memstore_item_size := flag.Uint64("I", 1024*1024, "max item sizem, default is 1m")
+	_memstore_item_size := flag.Uint("I", 1024*1024, "max item sizem, default is 1m")
 	logLevel := flag.Uint("loglevel", 3, "log level, 5=debug, 4=info, 3=warning, 2=error, 1=fatal, 0=panic")
 	pprof := flag.Bool("pprof", false, "enable pprof server")
 	flag.Parse()
@@ -86,7 +86,7 @@ func main() {
 	log.SetLevel(log.Level(*logLevel))
 
 	memstore_size := uint64(*_memstore_size) * 1024 * 1024
-	memstore_item_size := uint64(*_memstore_item_size)
+	memstore_item_size := uint32(*_memstore_item_size)
 
 	// Wait for a SIGINT or SIGTERM signal to gracefully shut down the server
 	sigChan := make(chan os.Signal, 1)
@@ -97,7 +97,7 @@ func main() {
 			log.Error(http.ListenAndServe("127.0.0.1:6060", nil))
 		}()
 	}
-	store = memstore.NewSharedStore[memcachedprotocol.MemcachedEntry]()
+	store = memstore.NewSharedStore()
 	store.SetMemoryLimit(memstore_size)
 	store.SetItemSizeLimit(memstore_item_size)
 
