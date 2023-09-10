@@ -363,7 +363,7 @@ func (ctx *BinaryProcessor) CommandBinary() error {
         return ctx.Response()
     }
 
-    return fmt.Errorf("not implemented opcode: %02x", ctx.request.opcode)
+    return fmt.Errorf("not implemented opcode: 0x%02x", ctx.request.opcode)
 }
 
 func (ctx *BinaryProcessor) ReadRequest() error {

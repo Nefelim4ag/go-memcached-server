@@ -10,6 +10,9 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+// Overhead size cost accounting for values
+const mEntrySize = 52
+
 type (
 	SharedStore struct {
 		size_limit      uint64
@@ -87,11 +90,13 @@ func (s *SharedStore) Set(key string, e *MEntry, size uint32) error {
 		shard.evictItem()
 	}
 
+	e.atime	= time.Now()
+
 	shard.Lock()
 	old, ok := shard.h[key]
 	if !ok {
 		shard.count++
-		shard.size += uint64(size)
+		shard.size += uint64(size) + mEntrySize
 	} else {
 		if old.Size != size {
 			shard.size -= uint64(old.Size)
@@ -118,10 +123,11 @@ func (s *SharedStore) Get(key string) (value *MEntry, ok bool) {
 			return nil, false
 		}
 
-		// Dirty hacky test of update items concurently
-		updated := e
-		updated.atime = time.Now()
-		shard.h[key] = updated
+		// Dirty hacky test of update items concurently =(
+		// fatal error: concurrent map read and map write
+		// updated := e
+		// updated.atime = time.Now()
+		// shard.h[key] = updated
 		value := e
 		return &value, ok
 	}
@@ -134,10 +140,8 @@ func (s *SharedStore) Delete(key string) {
 	shard.Lock()
 	old, ok := shard.h[key]
 	if ok {
-		shard.count--
-		shard.size -= uint64(old.Size)
+		shard.unsafeDelete(old.Key, &old)
 	}
-	delete(shard.h, key)
 	shard.Unlock()
 }
 
@@ -153,14 +157,18 @@ func (s *SharedStore) SetItemSizeLimit(limit uint32) {
 	s.item_size_limit = limit
 }
 
+func (shard *StoreShard) unsafeDelete(k string, v *MEntry) {
+	shard.count--
+	shard.size -= uint64(v.Size) - mEntrySize
+	delete(shard.h, k)
+}
+
 func (shard *StoreShard) tryExpireRandItem(flush time.Time) (expired bool) {
 	deleted := false
 
 	for k, v := range shard.h {
 		if flush.After(v.atime) {
-			shard.count--
-			shard.size -= uint64(v.Size)
-			delete(shard.h, k)
+			shard.unsafeDelete(k, &v)
 			deleted = true
 		}
 		break
@@ -191,15 +199,12 @@ func (shard *StoreShard) evictItem() {
 			}
 		}
 
-		shard.count--
-		shard.size -= uint64(oldest.Size)
-		delete(shard.h, oldest.Key)
-
+		shard.unsafeDelete(oldest.Key, &oldest)
 		shard.Unlock()
 		return
 	}
 
-	batch_size := min(128, shard.count/64)
+	batch_size := min(512, shard.count/64)
 
 	shard.Lock()
 	var oldest MEntry
@@ -215,10 +220,7 @@ func (shard *StoreShard) evictItem() {
 		batch_size--
 	}
 
-	shard.count--
-	shard.size -= uint64(oldest.Size)
-	delete(shard.h, oldest.Key)
-
+	shard.unsafeDelete(oldest.Key, &oldest)
 	shard.Unlock()
 }
 
