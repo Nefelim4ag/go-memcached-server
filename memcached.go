@@ -7,15 +7,15 @@ import (
 	"io"
 	"nefelim4ag/go-memcached-server/memcachedprotocol"
 	"nefelim4ag/go-memcached-server/memstore"
-	"nefelim4ag/go-memcached-server/tcpserver"
-	"net"
 	"net/http"
 	_ "net/http/pprof"
 	"os"
 	"os/signal"
-	"sync"
 	"syscall"
 
+	"github.com/pawelgaczynski/gain"
+	"github.com/pawelgaczynski/gain/logger"
+	"github.com/rs/zerolog"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -23,58 +23,84 @@ var (
 	store *memstore.SharedStore
 )
 
-func ConnectionHandler(conn *net.TCPConn, wg *sync.WaitGroup, err error) {
-	if err != nil {
-		log.Errorf(err.Error())
-		return
-	}
+type EventHandler struct {
+	server gain.Server
 
-	wg.Add(1)
-	defer wg.Done()
-	defer conn.Close()
+	logger zerolog.Logger
+}
 
+func (e *EventHandler) OnStart(server gain.Server) {
+	e.server = server
+	e.logger = zerolog.New(os.Stdout).With().Logger().Level(zerolog.InfoLevel)
+}
+
+type protocolContext struct {
+  r *bufio.Reader
+  binary *memcachedprotocol.BinaryProcessor
+  ascii *memcachedprotocol.ASCIIProcessor
+}
+
+func (e *EventHandler) OnAccept(conn gain.Conn) {
 	_r := bufio.NewReaderSize(conn, 64 * 1024)
 	_w := bufio.NewWriterSize(conn, 64 * 1024)
 
-	// Reuse context between binary commands
 	binaryProcessor := memcachedprotocol.CreateBinaryProcessor(_r, _w, store)
-	defer binaryProcessor.Close()
 	asciiProcessor := memcachedprotocol.CreateASCIIProcessor(_r, _w, store)
 
-	// Waiting for the client request
-	for {
-		magic, err := _r.ReadByte()
-		_r.UnreadByte()
-		switch err {
-		case nil:
-		case io.EOF:
-			log.Infof("client %s closed connection", conn.RemoteAddr())
-			return
-		default:
-			log.Errorf("error: %v\n", err)
-			return
-		}
+	c := protocolContext{
+		r: _r,
+		binary: binaryProcessor,
+        ascii: asciiProcessor,
+	}
 
-		if magic < 0x80 {
-			err = asciiProcessor.CommandAscii()
-			if err != nil {
-				return
-			}
-		} else if magic == 0x80 {
-			err = binaryProcessor.CommandBinary()
-			if err != nil {
-				log.Println(err)
-				return
-			}
-		} else {
-			log.Errorf("client %s aborted - unsupported protocol 0x%02x ~ %s", conn.RemoteAddr(), magic, string(magic))
+	conn.SetContext(c)
+}
+
+func (e *EventHandler) OnRead(conn gain.Conn, n int) {
+	c := conn.Context()
+	_r := c.(protocolContext).r
+	binaryProcessor := c.(protocolContext).binary
+	asciiProcessor := c.(protocolContext).ascii
+
+	magic, err := _r.ReadByte()
+	_r.UnreadByte()
+	switch err {
+	case nil:
+	case io.EOF:
+		log.Infof("client %s closed connection", conn.RemoteAddr())
+		return
+	default:
+		log.Errorf("error: %v\n", err)
+		return
+	}
+
+	if magic < 0x80 {
+		err = asciiProcessor.CommandAscii()
+		if err != nil {
+			conn.Close()
+			return
 		}
+	} else if magic == 0x80 {
+		err = binaryProcessor.CommandBinary()
+		if err != nil {
+			log.Println(err)
+			conn.Close()
+			return
+		}
+	} else {
+		log.Errorf("client %s aborted - unsupported protocol 0x%02x ~ %s", conn.RemoteAddr(), magic, string(magic))
 	}
 }
 
+func (e *EventHandler) OnWrite(conn gain.Conn, n int) {
+}
+
+func (e *EventHandler) OnClose(conn gain.Conn, err error) {
+}
+
 func main() {
-    log.SetOutput(os.Stdout)
-    log.SetLevel(log.DebugLevel)
+	log.SetOutput(os.Stdout)
+	log.SetLevel(log.DebugLevel)
 
 	_memstore_size := flag.Uint64("m", 512, "items memory in megabytes, default is 512")
 	_memstore_item_size := flag.Uint("I", 1024*1024, "max item sizem, default is 1m")
@@ -100,20 +126,17 @@ func main() {
 	store.SetMemoryLimit(memstore_size)
 	store.SetItemSizeLimit(memstore_item_size)
 
-	srvInstance := tcpserver.Server{}
-	err := srvInstance.ListenAndServe(":11211", ConnectionHandler)
-	if err != nil {
-		log.Fatal(err)
-	}
+	srvInstance := EventHandler{}
 
-	acceptThreads := 2
-	for acceptThreads > 0 {
-		acceptThreads -= 1
-		go srvInstance.AcceptConnections()
-	}
+	go func() {
+		err := gain.ListenAndServe(
+			fmt.Sprintf("tcp://127.0.0.1:%d", 11211), &srvInstance, gain.WithLoggerLevel(logger.WarnLevel))
+		if err != nil {
+			log.Panic(err)
+		}
+	}()
 
-	<-sigChan
+    <-sigChan
 	fmt.Println("Shutting down server...")
-	srvInstance.Stop()
-	fmt.Println("Server stopped.")
+	srvInstance.server.Shutdown()
 }

@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"nefelim4ag/go-memcached-server/memstore"
-	"sync"
 	"unsafe"
 
 	log "github.com/sirupsen/logrus"
@@ -142,59 +141,20 @@ type BinaryProcessor struct {
     response     ResponseHeader
     response_raw [24]byte
     key          []byte
-
-    sync.Mutex
-    writers      sync.WaitGroup
-    write_added  sync.Cond
-    write_buffer []byte
-    shutdown     bool
 }
 
-type RawResponse struct {
-    Bytes []byte
-}
+
 
 func CreateBinaryProcessor(rb *bufio.Reader, wb *bufio.Writer, store *memstore.SharedStore) *BinaryProcessor {
     b := BinaryProcessor{
         store: store,
         rb:    rb,
         wb:    wb,
-        // cw:           make(chan RawResponse, 1024),
-        shutdown: false,
     }
-    // b.write_added.L = &b
-
-    // b.writers.Add(1)
-    // go b.ASyncWriter()
     return &b
 }
 
 func (ctx *BinaryProcessor) Close() {
-    ctx.shutdown = true
-    // ctx.write_added.Broadcast()
-    // ctx.writers.Wait()
-    // close(ctx.cw)
-}
-
-func (ctx *BinaryProcessor) ASyncWriter() {
-    // defer ctx.writers.Done()
-    // for !ctx.shutdown {
-    //     ctx.Lock()
-    //     if len(ctx.write_buffer) == 0 {
-    //         ctx.write_added.Wait()
-    //     }
-    //     rsp := ctx.write_buffer
-    //     ctx.write_buffer = make([]byte, 0)
-    //     ctx.Unlock()
-    //     ctx.wb.Write(rsp)
-    //     ctx.wb.Flush()
-    // }
-
-    // for b := range ctx.cw {
-    //     // fmt.Printf("%048x\n", b.Bytes)
-    //     ctx.wb.Write(b.Bytes)
-    //     ctx.wb.Flush()
-    // }
 }
 
 func (ctx *BinaryProcessor) CommandBinary() error {
