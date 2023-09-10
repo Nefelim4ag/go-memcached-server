@@ -13,46 +13,46 @@ net.(*conn).Write -> net.(*netFD).Write -> internal/poll.(*FD).Write -> internal
 
 `go-memcached-server -m 2048`
 ```
-~ docker run --network=host --rm redislabs/memtier_benchmark:latest -h ::1 -p 11211 -P memcache_binary -c4 -t4 --test-time 30 --hide-histogram -d $((1024*1024))
+~ docker run --network=host --rm redislabs/memtier_benchmark:latest -h ::1 -p 11211 -P memcache_binary --test-time 50 --hide-histogram
 Writing results to stdout
 [RUN #1] Preparing benchmark client...
 [RUN #1] Launching threads now...
-[RUN #1 100%,  30 secs]  0 threads:     1061410 ops,   33645 (avg:   35379) ops/sec, 2.99GB/sec (avg: 3.14GB/sec),  0.47 (avg:  0.45) msec latency
+[RUN #1 100%,  50 secs]  0 threads:    23708960 ops,  446697 (avg:  474144) ops/sec, 18.12MB/sec (avg: 19.23MB/sec),  0.45 (avg:  0.42) msec latency
 
 4         Threads
-4         Connections per thread
-30        Seconds
+50        Connections per thread
+50        Seconds
 
 
 ALL STATS
 ============================================================================================================================
 Type         Ops/sec     Hits/sec   Misses/sec    Avg. Latency     p50 Latency     p99 Latency   p99.9 Latency       KB/sec
 ----------------------------------------------------------------------------------------------------------------------------
-Sets         3216.74          ---          ---         3.60373         3.51900         5.82300         7.00700   3294084.81
-Gets        32162.53         6.30     32156.23         0.13619         0.07900         0.91100         1.87900      1221.43
+Sets        43106.18          ---          ---         0.42322         0.40700         0.87900         3.87100      3320.78
+Gets       431042.64         0.00    431042.64         0.42162         0.40700         0.87100         3.75900     16369.31
 Waits           0.00          ---          ---             ---             ---             ---             ---          ---
-Totals      35379.26         6.30     32156.23         0.45146         0.08700         4.60700         5.82300   3295306.24
+Totals     474148.82         0.00    431042.64         0.42176         0.40700         0.87100         3.77500     19690.09
 ```
 
 `memcached -m 2048 -p 11211`
 ```
-~ docker run --network=host --rm redislabs/memtier_benchmark:latest -h ::1 -p 11211 -P memcache_binary -c4 -t4 --test-time 30 --hide-histogram -d $((1024*1024))
+~ docker run --network=host --rm redislabs/memtier_benchmark:latest -h ::1 -p 11211 -P memcache_binary --test-time 50 --hide-histogram
 Writing results to stdout
 [RUN #1] Preparing benchmark client...
 [RUN #1] Launching threads now...
-[RUN #1 100%,  30 secs]  0 threads:     1706678 ops,   55580 (avg:   56888) ops/sec, 4.94GB/sec (avg: 5.05GB/sec),  0.29 (avg:  0.28) msec latency
+[RUN #1 100%,  50 secs]  0 threads:    24933893 ops,  476625 (avg:  498648) ops/sec, 19.33MB/sec (avg: 20.22MB/sec),  0.42 (avg:  0.40) msec latency
 
 4         Threads
-4         Connections per thread
-30        Seconds
+50        Connections per thread
+50        Seconds
 
 
 ALL STATS
 ============================================================================================================================
 Type         Ops/sec     Hits/sec   Misses/sec    Avg. Latency     p50 Latency     p99 Latency   p99.9 Latency       KB/sec
 ----------------------------------------------------------------------------------------------------------------------------
-Sets         5172.01          ---          ---         2.36731         2.39900         3.79100         4.35100   5296371.00
-Gets        51716.23         0.00     51716.23         0.07231         0.06300         0.35900         0.61500      1963.99
+Sets        45332.80          ---          ---         0.40548         0.38300         0.66300         1.81500      3492.28
+Gets       453306.53       242.02    453064.51         0.40057         0.38300         0.65500         1.68700     17214.82
 Waits           0.00          ---          ---             ---             ---             ---             ---          ---
-Totals      56888.23         0.00     51716.23         0.28096         0.06300         2.89500         3.77500   5298334.99
+Totals     498639.33       242.02    453064.51         0.40102         0.38300         0.66300         1.69500     20707.10
 ```

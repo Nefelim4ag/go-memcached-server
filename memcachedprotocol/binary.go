@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"nefelim4ag/go-memcached-server/memstore"
+	"sync"
 	"time"
 	"unsafe"
 
@@ -142,7 +143,6 @@ type BinaryProcessor struct {
     store *memstore.SharedStore
     rb    *bufio.Reader
     wb    *bufio.Writer
-    // cw    chan  *[]byte
 
     raw_request  []byte
     flags        []byte
@@ -151,32 +151,66 @@ type BinaryProcessor struct {
     response     ResponseHeader
     response_raw []byte
     key          []byte
+
+    sync.Mutex
+    writers      sync.WaitGroup
+    write_added  sync.Cond
+    write_buffer []byte
+    shutdown     bool
+
+
+}
+
+type RawResponse struct {
+    Bytes []byte
 }
 
 func CreateBinaryProcessor(rb *bufio.Reader, wb *bufio.Writer, store *memstore.SharedStore) *BinaryProcessor {
-    return &BinaryProcessor{
+    b := BinaryProcessor{
         store:        store,
         rb:           rb,
         wb:           wb,
-        // cw:           make(chan *[]byte, 1024),
+        // cw:           make(chan RawResponse, 1024),
         raw_request:  make([]byte, unsafe.Sizeof(RequestHeader{})),
         flags:        make([]byte, 4),
         exptime:      make([]byte, 4),
         response_raw: make([]byte, unsafe.Sizeof(ResponseHeader{})),
+        shutdown:     false,
     }
+    b.write_added.L = &b
+
+    b.writers.Add(1)
+    go b.ASyncWriter()
+    return &b
 }
 
-// func (ctx *BinaryProcessor) Close() {
-//     close(ctx.cw)
-// }
+func (ctx *BinaryProcessor) Close() {
+    ctx.shutdown = true
+    ctx.write_added.Broadcast()
+    ctx.writers.Wait()
+    // close(ctx.cw)
+}
 
-// func (ctx *BinaryProcessor) ASyncWriter() {
-//     for b := range ctx.cw {
-//         fmt.Printf("%048x\n", *b)
-//         ctx.wb.Write(*b)
-//         ctx.wb.Flush()
-//     }
-// }
+func (ctx *BinaryProcessor) ASyncWriter() {
+    defer ctx.writers.Done()
+    for !ctx.shutdown{
+        ctx.Lock()
+        if len(ctx.write_buffer) == 0 {
+            ctx.write_added.Wait()
+        }
+        rsp := ctx.write_buffer
+        ctx.write_buffer = make([]byte, 0)
+        ctx.Unlock()
+        ctx.wb.Write(rsp)
+        ctx.wb.Flush()
+    }
+
+    // for b := range ctx.cw {
+    //     // fmt.Printf("%048x\n", b.Bytes)
+    //     ctx.wb.Write(b.Bytes)
+    //     ctx.wb.Flush()
+    // }
+}
 
 func (ctx *BinaryProcessor) CommandBinary() error {
     err := ctx.ReadRequest()
@@ -184,7 +218,7 @@ func (ctx *BinaryProcessor) CommandBinary() error {
         return err
     }
 
-    defer ctx.wb.Flush()
+    // defer ctx.wb.Flush()
 
     ctx.DecodeRequestHeader()
 
@@ -237,10 +271,12 @@ func (ctx *BinaryProcessor) CommandBinary() error {
 
         if ctx.request.cas != 0 {
             _v, ok := ctx.store.Get(entry.Key)
-            v := *_v
-            if ok && ctx.request.cas != v.Cas {
-                ctx.response.status = Exist
-                return ctx.Response()
+            if ok {
+                v := *_v
+                if ctx.request.cas != v.Cas {
+                    ctx.response.status = Exist
+                    return ctx.Response()
+                }
             }
         }
 
@@ -294,11 +330,7 @@ func (ctx *BinaryProcessor) CommandBinary() error {
         ctx.response.totalBody = 4 + uint32(len(v.Value))
         flags := flagsType(v.Flags).Bytes()
 
-        ctx.Response()
-        ctx.wb.Write(flags)
-        //ctx.cw <- &flags
-        ctx.wb.Write(v.Value)
-        //ctx.cw <- &v.value
+        ctx.Response(flags, v.Value)
 
         return nil
     case Flush, FlushQ:
@@ -344,14 +376,30 @@ func (ctx *BinaryProcessor) ReadRequest() error {
     return nil
 }
 
-func (ctx *BinaryProcessor) Response() error {
+func (ctx *BinaryProcessor) Response(bytes ...[]byte) error {
     ctx.PrepareResponse()
-
-    // ctx.cw <- &ctx.response_raw
-    _, err := ctx.wb.Write(ctx.response_raw)
-    if err != nil {
-        return err
+    rsp := ctx.response_raw
+    for _, b := range bytes {
+        rsp = append(rsp, b[:]...)
     }
+
+    ctx.Lock()
+    ctx.write_buffer = append(ctx.write_buffer, rsp...)
+    ctx.Unlock()
+    ctx.write_added.Signal()
+
+    // ctx.cw <- RawResponse{
+    //     Bytes: rsp,
+    // }
+
+    // ctx.wb.Write(flags)
+    // //ctx.cw <- &flags
+    // ctx.wb.Write(v.Value)
+    // //ctx.cw <- &v.value
+    // _, err := ctx.wb.Write(ctx.response_raw)
+    // if err != nil {
+    //     return err
+    // }
 
     return nil
 }

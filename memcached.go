@@ -38,8 +38,7 @@ func ConnectionHandler(conn *net.TCPConn, wg *sync.WaitGroup, err error) {
 
 	// Reuse context between binary commands
 	binaryProcessor := memcachedprotocol.CreateBinaryProcessor(_r, _w, store)
-	// go binaryProcessor.ASyncWriter()
-	// defer binaryProcessor.Close()
+	defer binaryProcessor.Close()
 	asciiProcessor := memcachedprotocol.CreateASCIIProcessor(_r, _w, store)
 
 	// Waiting for the client request
