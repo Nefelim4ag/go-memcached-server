@@ -11,16 +11,16 @@ import (
 )
 
 // Overhead size cost accounting for values
-const mEntrySize = 52
+const mEntrySize = 44
 
 type (
 	SharedStore struct {
 		size_limit      uint64
 		item_size_limit uint32
-		flush           time.Time
-		storeShards     []StoreShard
-		shardsCount     uint
+		shardsCount     uint32
+		flush           int64
 		ctime 			int64
+		storeShards     []StoreShard
 	}
 
 	StoreShard struct {
@@ -29,19 +29,20 @@ type (
 		sync.RWMutex
 		count uint64 // count of items in shard
 		size  uint64 // total size of items in shard
+		cas_s uint64 // cas source monotonically increasing
 		// 8 ? byte map pointer
 		h map[string]MEntry // map in shard
 	}
 
 	MEntry struct {
-		Flags   uint32
+		Flags   [4]byte
 		ExpTime uint32
 		Size    uint32
 		Cas     uint64
 		Key     string
 		Value   []byte
 
-		atime   time.Time
+		atime   int64
 	}
 )
 
@@ -54,11 +55,11 @@ func NextPowOf2(n int) uint {
 }
 
 func NewSharedStore() *SharedStore {
-	numCpu := NextPowOf2(runtime.NumCPU())
+	numCpu := uint32(NextPowOf2(runtime.NumCPU()))
 	S := SharedStore{
 		storeShards: make([]StoreShard, numCpu),
-		shardsCount: uint(numCpu),
-		flush:       time.Now(),
+		shardsCount: numCpu,
+		flush:       time.Now().UnixMicro(),
 		ctime:       time.Now().Unix(),
 	}
 
@@ -90,9 +91,11 @@ func (s *SharedStore) Set(key string, e *MEntry, size uint32) error {
 		shard.evictItem()
 	}
 
-	e.atime	= time.Now()
+	e.atime	= time.Now().UnixMicro()
 
 	shard.Lock()
+	shard.cas_s++
+	e.Cas = shard.cas_s
 	old, ok := shard.h[key]
 	if !ok {
 		shard.count++
@@ -116,7 +119,7 @@ func (s *SharedStore) Get(key string) (value *MEntry, ok bool) {
 
 	e, ok := shard.h[key]
 	if ok {
-		if s.flush.After(e.atime) {
+		if s.flush > e.atime {
 			return nil, false
 		}
 		if e.ExpTime > 0 && s.ctime > int64(e.ExpTime) {
@@ -126,7 +129,7 @@ func (s *SharedStore) Get(key string) (value *MEntry, ok bool) {
 		// Dirty hacky test of update items concurently =(
 		// fatal error: concurrent map read and map write
 		// updated := e
-		// updated.atime = time.Now()
+		// updated.atime = time.Now().UnixMicro()
 		// shard.h[key] = updated
 		value := e
 		return &value, ok
@@ -146,7 +149,7 @@ func (s *SharedStore) Delete(key string) {
 }
 
 func (s *SharedStore) Flush() {
-	s.flush = time.Now()
+	s.flush = time.Now().UnixMicro()
 }
 
 func (s *SharedStore) SetMemoryLimit(limit uint64) {
@@ -163,11 +166,11 @@ func (shard *StoreShard) unsafeDelete(k string, v *MEntry) {
 	delete(shard.h, k)
 }
 
-func (shard *StoreShard) tryExpireRandItem(flush time.Time) (expired bool) {
+func (shard *StoreShard) tryExpireRandItem(flush int64) (expired bool) {
 	deleted := false
 
 	for k, v := range shard.h {
-		if flush.After(v.atime) {
+		if flush > v.atime {
 			shard.unsafeDelete(k, &v)
 			deleted = true
 		}
@@ -194,7 +197,7 @@ func (shard *StoreShard) evictItem() {
 		}
 
 		for _, v := range shard.h {
-			if v.atime.Before(oldest.atime) {
+			if v.atime < oldest.atime {
 				oldest = v
 			}
 		}
@@ -213,7 +216,7 @@ func (shard *StoreShard) evictItem() {
 			break
 		}
 
-		if v.atime.Before(oldest.atime) {
+		if v.atime < oldest.atime {
 			oldest = v
 		}
 
@@ -230,7 +233,7 @@ func (s *SharedStore) LRUCrawler() {
 	for {
 		s.ctime = time.Now().Unix()
 
-		if last_flush.Before(s.flush) {
+		if last_flush < s.flush {
 			for k, _ := range s.storeShards {
 				shard := &s.storeShards[k]
 				items_count := shard.count

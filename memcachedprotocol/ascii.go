@@ -2,6 +2,7 @@ package memcachedprotocol
 
 import (
 	"bufio"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"nefelim4ag/go-memcached-server/memstore"
@@ -9,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unsafe"
 
 	log "github.com/sirupsen/logrus"
 )
@@ -111,11 +113,13 @@ func (ctx *ASCIIProcessor) CommandAscii() error {
 
 				// VALUE <key> <Flags> <bytes> [<cas unique>]\r\n
 				// <data block>\r\n
+				_flags := unsafe.Slice(&entry.Flags[0], len(entry.Flags))
+				flags := binary.BigEndian.Uint32(_flags)
 				if command == "get" {
-					resp := fmt.Sprintf("VALUE %s %d %d\r\n", entry.Key, entry.Flags, entry.Size)
+					resp := fmt.Sprintf("VALUE %s %d %d\r\n", entry.Key, flags, entry.Size)
 					ctx.wb.Write([]byte(resp))
 				} else {
-					resp := fmt.Sprintf("VALUE %s %d %d %d\r\n", entry.Key, entry.Flags, entry.Size, entry.Cas)
+					resp := fmt.Sprintf("VALUE %s %d %d %d\r\n", entry.Key, flags, entry.Size, entry.Cas)
 					ctx.wb.Write([]byte(resp))
 				}
 				ctx.wb.Write(entry.Value)
@@ -193,12 +197,13 @@ func (ctx *ASCIIProcessor) set_add_replace(command string, args []string) error 
 
 	entry := memstore.MEntry{
 		Key: key,
-		Flags: uint32(Flags),
 		ExpTime: uint32(ExpTime),
 		Size: uint32(nbytes),
-		Cas: uint64(time.Now().UnixNano()),
 		Value: make([]byte, nbytes),
 	}
+
+	_f := unsafe.Slice(&entry.Flags[0], len(entry.Flags))
+	binary.BigEndian.PutUint32(_f, uint32(Flags))
 
 	if nbytes > 0 {
 		_, err := io.ReadFull(ctx.rb, entry.Value)
@@ -261,12 +266,13 @@ func (ctx *ASCIIProcessor) append_prepend(command string, args []string) error {
 
 	entry := memstore.MEntry{
 		Key: key,
-		Flags: uint32(Flags),
 		ExpTime: uint32(ExpTime),
 		Size: uint32(nbytes),
 		Cas: uint64(time.Now().UnixNano()),
 		Value: make([]byte, nbytes),
 	}
+	_f := unsafe.Slice(&entry.Flags[0], len(entry.Flags))
+	binary.BigEndian.PutUint32(_f, uint32(Flags))
 
 	if nbytes > 0 {
 		_, err := io.ReadFull(ctx.rb, entry.Value)
@@ -341,12 +347,13 @@ func (ctx *ASCIIProcessor) cas(args []string) error {
 
 	entry := memstore.MEntry{
 		Key: key,
-		Flags: uint32(Flags),
 		ExpTime: uint32(ExpTime),
 		Size: uint32(bytes),
 		Cas: uint64(time.Now().UnixNano()),
 		Value: make([]byte, bytes),
 	}
+	_f := unsafe.Slice(&entry.Flags[0], len(entry.Flags))
+	binary.BigEndian.PutUint32(_f, uint32(Flags))
 
 	if bytes > 0 {
 		_, err := io.ReadFull(ctx.rb, entry.Value)

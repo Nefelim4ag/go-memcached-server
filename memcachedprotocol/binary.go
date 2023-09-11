@@ -7,7 +7,6 @@ import (
 	"io"
 	"nefelim4ag/go-memcached-server/memstore"
 	"sync"
-	"time"
 	"unsafe"
 
 	log "github.com/sirupsen/logrus"
@@ -107,14 +106,6 @@ const (
     ResponseMagic Magic = 0x81
 )
 
-type flagsType uint32
-
-func (f flagsType) Bytes() []byte {
-    b := make([]byte, 4)
-    binary.BigEndian.PutUint32(b, uint32(f))
-    return b
-}
-
 type RequestHeader struct {
     magic     Magic
     opcode    OpcodeType
@@ -144,12 +135,12 @@ type BinaryProcessor struct {
     rb    *bufio.Reader
     wb    *bufio.Writer
 
-    raw_request  []byte
-    flags        []byte
-    exptime      []byte
+    raw_request  [24]byte
+    flags        [4]byte
+    exptime      [4]byte
     request      RequestHeader
     response     ResponseHeader
-    response_raw []byte
+    response_raw [24]byte
     key          []byte
 
     sync.Mutex
@@ -157,8 +148,6 @@ type BinaryProcessor struct {
     write_added  sync.Cond
     write_buffer []byte
     shutdown     bool
-
-
 }
 
 type RawResponse struct {
@@ -167,43 +156,39 @@ type RawResponse struct {
 
 func CreateBinaryProcessor(rb *bufio.Reader, wb *bufio.Writer, store *memstore.SharedStore) *BinaryProcessor {
     b := BinaryProcessor{
-        store:        store,
-        rb:           rb,
-        wb:           wb,
+        store: store,
+        rb:    rb,
+        wb:    wb,
         // cw:           make(chan RawResponse, 1024),
-        raw_request:  make([]byte, unsafe.Sizeof(RequestHeader{})),
-        flags:        make([]byte, 4),
-        exptime:      make([]byte, 4),
-        response_raw: make([]byte, unsafe.Sizeof(ResponseHeader{})),
-        shutdown:     false,
+        shutdown: false,
     }
-    b.write_added.L = &b
+    // b.write_added.L = &b
 
-    b.writers.Add(1)
-    go b.ASyncWriter()
+    // b.writers.Add(1)
+    // go b.ASyncWriter()
     return &b
 }
 
 func (ctx *BinaryProcessor) Close() {
     ctx.shutdown = true
-    ctx.write_added.Broadcast()
-    ctx.writers.Wait()
+    // ctx.write_added.Broadcast()
+    // ctx.writers.Wait()
     // close(ctx.cw)
 }
 
 func (ctx *BinaryProcessor) ASyncWriter() {
-    defer ctx.writers.Done()
-    for !ctx.shutdown{
-        ctx.Lock()
-        if len(ctx.write_buffer) == 0 {
-            ctx.write_added.Wait()
-        }
-        rsp := ctx.write_buffer
-        ctx.write_buffer = make([]byte, 0)
-        ctx.Unlock()
-        ctx.wb.Write(rsp)
-        ctx.wb.Flush()
-    }
+    // defer ctx.writers.Done()
+    // for !ctx.shutdown {
+    //     ctx.Lock()
+    //     if len(ctx.write_buffer) == 0 {
+    //         ctx.write_added.Wait()
+    //     }
+    //     rsp := ctx.write_buffer
+    //     ctx.write_buffer = make([]byte, 0)
+    //     ctx.Unlock()
+    //     ctx.wb.Write(rsp)
+    //     ctx.wb.Flush()
+    // }
 
     // for b := range ctx.cw {
     //     // fmt.Printf("%048x\n", b.Bytes)
@@ -218,8 +203,6 @@ func (ctx *BinaryProcessor) CommandBinary() error {
         return err
     }
 
-    // defer ctx.wb.Flush()
-
     ctx.DecodeRequestHeader()
 
     // By protocol opcode & opaque same as client request
@@ -232,12 +215,14 @@ func (ctx *BinaryProcessor) CommandBinary() error {
 
     switch ctx.request.opcode {
     case Set, SetQ, Add, AddQ:
-        flags := ctx.flags
-        exptime := ctx.exptime
-        key := ctx.key
-        if uint16(len(ctx.key)) != ctx.request.keyLen {
-            key = make([]byte, ctx.request.keyLen)
+        flags := unsafe.Slice(&ctx.flags[0], len(ctx.flags))
+        exptime := unsafe.Slice(&ctx.exptime[0], len(ctx.exptime))
+
+        if uint16(len(ctx.key)) < ctx.request.keyLen {
+            ctx.key = make([]byte, ctx.request.keyLen)
         }
+        key := unsafe.Slice(&ctx.key[0], ctx.request.keyLen)
+
         bodyLen := ctx.request.totalBody - uint32(ctx.request.keyLen) - uint32(ctx.request.extrasLen)
         value := make([]byte, bodyLen)
         err_s := make([]error, 4)
@@ -262,12 +247,11 @@ func (ctx *BinaryProcessor) CommandBinary() error {
 
         entry := memstore.MEntry{
             Key:     string(key[:]),
-            Flags:   binary.BigEndian.Uint32(flags),
             ExpTime: binary.BigEndian.Uint32(exptime),
-            Size:     bodyLen,
-            Cas:     uint64(time.Now().UnixNano()),
+            Size:    bodyLen,
             Value:   value,
         }
+        copy(unsafe.Slice(&entry.Flags[0], len(entry.Flags)), flags)
 
         if ctx.request.cas != 0 {
             _v, ok := ctx.store.Get(entry.Key)
@@ -303,10 +287,10 @@ func (ctx *BinaryProcessor) CommandBinary() error {
 
         return ctx.Response()
     case Get, GetQ:
-        key := ctx.key
-        if uint16(len(ctx.key)) != ctx.request.keyLen {
-            key = make([]byte, ctx.request.keyLen)
+        if uint16(len(ctx.key)) < ctx.request.keyLen {
+            ctx.key = make([]byte, ctx.request.keyLen)
         }
+        key := unsafe.Slice(&ctx.key[0], ctx.request.keyLen)
         _, err = ctx.rb.Read(key)
         if err != nil {
             ctx.response.status = EInter
@@ -314,7 +298,8 @@ func (ctx *BinaryProcessor) CommandBinary() error {
             return err
         }
 
-        _v, ok := ctx.store.Get(string(key[:]))
+        _key := unsafe.String(&key[0], len(key))
+        _v, ok := ctx.store.Get(_key)
 
         if !ok {
             if ctx.request.opcode == GetQ {
@@ -328,16 +313,16 @@ func (ctx *BinaryProcessor) CommandBinary() error {
         ctx.response.cas = v.Cas
         ctx.response.extrasLen = 4
         ctx.response.totalBody = 4 + uint32(len(v.Value))
-        flags := flagsType(v.Flags).Bytes()
+        flags := unsafe.Slice(&v.Flags[0], len(v.Flags))
 
         ctx.Response(flags, v.Value)
 
         return nil
     case Flush, FlushQ:
-        exptime := ctx.exptime
+        exptime := unsafe.Slice(&ctx.exptime[0], len(ctx.exptime))
         if ctx.request.extrasLen == 4 {
             _, err = ctx.rb.Read(exptime)
-            if err!= nil {
+            if err != nil {
                 ctx.response.status = EInter
                 ctx.Response()
                 return err
@@ -367,7 +352,8 @@ func (ctx *BinaryProcessor) CommandBinary() error {
 }
 
 func (ctx *BinaryProcessor) ReadRequest() error {
-    _, err := ctx.rb.Read(ctx.raw_request)
+    raw_request := unsafe.Slice(&ctx.raw_request[0], len(ctx.raw_request))
+    _, err := ctx.rb.Read(raw_request)
 
     if err != nil {
         return err
@@ -378,15 +364,15 @@ func (ctx *BinaryProcessor) ReadRequest() error {
 
 func (ctx *BinaryProcessor) Response(bytes ...[]byte) error {
     ctx.PrepareResponse()
-    rsp := ctx.response_raw
-    for _, b := range bytes {
-        rsp = append(rsp, b[:]...)
-    }
+    rsp := unsafe.Slice(&ctx.response_raw[0], len(ctx.response_raw))
 
-    ctx.Lock()
-    ctx.write_buffer = append(ctx.write_buffer, rsp...)
-    ctx.Unlock()
-    ctx.write_added.Signal()
+    // ctx.Lock()
+    // ctx.write_buffer = append(ctx.write_buffer, rsp...)
+    // for _, b := range bytes {
+    //     ctx.write_buffer = append(ctx.write_buffer, b[:]...)
+    // }
+    // ctx.Unlock()
+    // ctx.write_added.Signal()
 
     // ctx.cw <- RawResponse{
     //     Bytes: rsp,
@@ -396,12 +382,18 @@ func (ctx *BinaryProcessor) Response(bytes ...[]byte) error {
     // //ctx.cw <- &flags
     // ctx.wb.Write(v.Value)
     // //ctx.cw <- &v.value
-    // _, err := ctx.wb.Write(ctx.response_raw)
-    // if err != nil {
-    //     return err
-    // }
+    _, err := ctx.wb.Write(rsp)
+    if err != nil {
+        return err
+    }
+    for _, b := range bytes {
+        _, err := ctx.wb.Write(b)
+        if err != nil {
+            return err
+        }
+    }
 
-    return nil
+    return ctx.wb.Flush()
 }
 
 func (ctx *BinaryProcessor) DecodeRequestHeader() {
@@ -435,37 +427,27 @@ func (ctx *BinaryProcessor) PrepareResponse() {
     ctx.response_raw[0] = byte(ctx.response.magic)
     ctx.response_raw[1] = byte(ctx.response.opcode)
 
-    binary.BigEndian.PutUint16(ctx.raw_request, uint16(ctx.response.keyLen))
-    ctx.response_raw[2] = ctx.raw_request[0]
-    ctx.response_raw[3] = ctx.raw_request[1]
+    // Write response directly to buffer
+    keyLen := unsafe.Slice(&ctx.response_raw[2], 2)
+    binary.BigEndian.PutUint16(keyLen, uint16(ctx.response.keyLen))
 
     ctx.response_raw[4] = ctx.response.extrasLen
     ctx.response_raw[5] = ctx.response.dataType
 
-    binary.BigEndian.PutUint16(ctx.raw_request, uint16(ctx.response.status))
-    ctx.response_raw[6] = ctx.raw_request[0]
-    ctx.response_raw[7] = ctx.raw_request[1]
+    status := unsafe.Slice(&ctx.response_raw[6], 2)
+    binary.BigEndian.PutUint16(status, uint16(ctx.response.status))
 
-    binary.BigEndian.PutUint32(ctx.raw_request, uint32(ctx.response.totalBody))
-    ctx.response_raw[8] = ctx.raw_request[0]
-    ctx.response_raw[9] = ctx.raw_request[1]
-    ctx.response_raw[10] = ctx.raw_request[2]
-    ctx.response_raw[11] = ctx.raw_request[3]
+    totalBody := unsafe.Slice(&ctx.response_raw[8], 4)
+    binary.BigEndian.PutUint32(totalBody, uint32(ctx.response.totalBody))
 
     ctx.response_raw[12] = ctx.response.opaque[0]
     ctx.response_raw[13] = ctx.response.opaque[1]
     ctx.response_raw[14] = ctx.response.opaque[2]
     ctx.response_raw[15] = ctx.response.opaque[3]
 
-    binary.BigEndian.PutUint64(ctx.raw_request, uint64(ctx.response.cas))
-    ctx.response_raw[16] = ctx.raw_request[0]
-    ctx.response_raw[17] = ctx.raw_request[1]
-    ctx.response_raw[18] = ctx.raw_request[2]
-    ctx.response_raw[19] = ctx.raw_request[3]
-    ctx.response_raw[20] = ctx.raw_request[4]
-    ctx.response_raw[21] = ctx.raw_request[5]
-    ctx.response_raw[22] = ctx.raw_request[6]
-    ctx.response_raw[23] = ctx.raw_request[7]
+    cas := unsafe.Slice(&ctx.response_raw[16], 8)
+    binary.BigEndian.PutUint64(cas, uint64(ctx.response.cas))
+
     if log.GetLevel() == log.DebugLevel {
         log.Debugf("Magic:  0x%02x\n", ctx.response_raw[0])
         log.Debugf("Opcode: 0x%02x\n", ctx.response_raw[1])
