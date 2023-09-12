@@ -188,27 +188,7 @@ func (shard *StoreShard) evictItem() {
 		return
 	}
 
-	if shard.count < 1024 {
-		shard.Lock()
-		var oldest MEntry
-		for _, v := range shard.h {
-			oldest = v
-			break
-		}
-
-		for _, v := range shard.h {
-			if v.atime < oldest.atime {
-				oldest = v
-			}
-		}
-
-		shard.unsafeDelete(oldest.Key, &oldest)
-		shard.Unlock()
-		return
-	}
-
-	batch_size := min(512, shard.count/64)
-
+	batch_size := 1024
 	shard.Lock()
 	var oldest MEntry
 	for _, v := range shard.h {
