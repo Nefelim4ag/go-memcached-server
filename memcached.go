@@ -37,8 +37,7 @@ func ConnectionHandler(conn *net.TCPConn, wg *sync.WaitGroup, err error) {
 	_w := bufio.NewWriterSize(conn, 64 * 1024)
 
 	// Reuse context between binary commands
-	binaryProcessor := memcachedprotocol.CreateBinaryProcessor(_r, _w, store)
-	defer binaryProcessor.Close()
+	binaryProcessor := memcachedprotocol.CreateBinaryProcessor(_r, conn, store)
 	asciiProcessor := memcachedprotocol.CreateASCIIProcessor(_r, _w, store)
 
 	// Waiting for the client request

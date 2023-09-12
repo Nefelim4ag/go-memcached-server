@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"nefelim4ag/go-memcached-server/memstore"
+	"net"
 	"unsafe"
 
 	log "github.com/sirupsen/logrus"
@@ -132,63 +133,26 @@ type ResponseHeader struct {
 type BinaryProcessor struct {
     store *memstore.SharedStore
     rb    *bufio.Reader
-    wb    *bufio.Writer
-    wbc   chan []byte
+    conn  *net.TCPConn
 
     raw_request  [24]byte
     flags        [4]byte
     exptime      [4]byte
     request      RequestHeader
     response     ResponseHeader
-    response_raw [24]byte
+    response_raw []byte
     key          []byte
 }
 
-type rawResponse struct {
-    bytes []byte
-}
-
-func CreateBinaryProcessor(rb *bufio.Reader, wb *bufio.Writer, store *memstore.SharedStore) *BinaryProcessor {
+func CreateBinaryProcessor(rb *bufio.Reader, conn *net.TCPConn, store *memstore.SharedStore) *BinaryProcessor {
     b := BinaryProcessor{
-        store: store,
-        rb:    rb,
-        wb:    wb,
-        // cw:           make(chan rawResponse, 1024),
-        // shutdown: false,
+        store:        store,
+        rb:           rb,
+        conn:         conn,
+        response_raw: make([]byte, 128),
     }
-    // b.write_added.L = &b
 
-    // b.writers.Add(1)
-    // go b.ASyncWriter()
     return &b
-}
-
-func (ctx *BinaryProcessor) Close() {
-    // ctx.shutdown = true
-    // ctx.write_added.Broadcast()
-    // ctx.writers.Wait()
-    // close(ctx.cw)
-}
-
-func (ctx *BinaryProcessor) ASyncWriter() {
-    // defer ctx.writers.Done()
-    // for !ctx.shutdown {
-    //     ctx.Lock()
-    //     if len(ctx.write_buffer) == 0 {
-    //         ctx.write_added.Wait()
-    //     }
-    //     rsp := ctx.write_buffer
-    //     ctx.write_buffer = make([]byte, 0)
-    //     ctx.Unlock()
-    //     ctx.wb.Write(rsp)
-    //     ctx.wb.Flush()
-    // }
-
-    // for b := range ctx.cw {
-    //     // fmt.Printf("%048x\n", b.Bytes)
-    //     ctx.wb.Write(b.Bytes)
-    //     ctx.wb.Flush()
-    // }
 }
 
 func (ctx *BinaryProcessor) CommandBinary() error {
@@ -218,7 +182,12 @@ func (ctx *BinaryProcessor) CommandBinary() error {
         key := unsafe.Slice(&ctx.key[0], ctx.request.keyLen)
 
         bodyLen := ctx.request.totalBody - uint32(ctx.request.keyLen) - uint32(ctx.request.extrasLen)
-        value := make([]byte, bodyLen)
+        __value := ctx.store.ValuePool.Get().(*[]byte)
+        _value := *__value
+        if len(_value) < int(bodyLen) {
+            _value = append(_value, make([]byte, int(bodyLen)-len(_value))...)
+        }
+        value := unsafe.Slice(&_value[0], int(bodyLen))
         err_s := make([]error, 4)
         _, err_s[0] = ctx.rb.Read(flags)
         _, err_s[1] = ctx.rb.Read(exptime)
@@ -309,7 +278,7 @@ func (ctx *BinaryProcessor) CommandBinary() error {
         ctx.response.totalBody = 4 + uint32(len(v.Value))
         flags := unsafe.Slice(&v.Flags[0], len(v.Flags))
 
-        ctx.Response(flags, v.Value)
+        ctx.Response(flags, unsafe.Slice(&v.Value[0], v.Size))
 
         return nil
     case Flush, FlushQ:
@@ -358,36 +327,26 @@ func (ctx *BinaryProcessor) ReadRequest() error {
 
 func (ctx *BinaryProcessor) Response(bytes ...[]byte) error {
     ctx.PrepareResponse()
-    rsp := unsafe.Slice(&ctx.response_raw[0], len(ctx.response_raw))
-
-    // ctx.Lock()
-    // ctx.write_buffer = append(ctx.write_buffer, rsp...)
-    // for _, b := range bytes {
-    //     ctx.write_buffer = append(ctx.write_buffer, b[:]...)
-    // }
-    // ctx.Unlock()
-    // ctx.write_added.Signal()
-
-    // ctx.cw <- rawResponse{
-    //     Bytes: rsp,
-    // }
-
-    // ctx.wb.Write(flags)
-    // //ctx.cw <- &flags
-    // ctx.wb.Write(v.Value)
-    // //ctx.cw <- &v.value
-    _, err := ctx.wb.Write(rsp)
-    if err != nil {
-        return err
+    sum := 24
+    for _, arg := range bytes {
+        sum += len(arg)
     }
-    for _, b := range bytes {
-        _, err := ctx.wb.Write(b)
-        if err != nil {
-            return err
+    if cap(ctx.response_raw) < sum {
+        diff := sum - cap(ctx.response_raw)
+        ctx.response_raw = append(ctx.response_raw, make([]byte, diff)...)
+    }
+
+    sum = 24
+    for _, arg := range bytes {
+        for _, b := range arg {
+            ctx.response_raw[sum] = b
+            sum++
         }
     }
 
-    return ctx.wb.Flush()
+    ctx.conn.Write(unsafe.Slice(&ctx.response_raw[0], sum))
+
+    return nil
 }
 
 func (ctx *BinaryProcessor) DecodeRequestHeader() {

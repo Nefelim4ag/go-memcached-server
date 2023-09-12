@@ -20,7 +20,8 @@ type (
 		item_size_limit uint32
 		shardsCount     uint32
 		flush           int64
-		ctime 			int64
+		ctime           int64
+		ValuePool       sync.Pool
 		storeShards     []StoreShard
 	}
 
@@ -43,7 +44,7 @@ type (
 		Key     string
 		Value   []byte
 
-		atime   int64
+		atime int64
 	}
 )
 
@@ -62,6 +63,12 @@ func NewSharedStore() *SharedStore {
 		shardsCount: numCpu,
 		flush:       time.Now().UnixMicro(),
 		ctime:       time.Now().Unix(),
+		ValuePool: sync.Pool{
+			New: func() interface{} {
+				b := make([]byte, 8)
+				return &b
+			},
+		},
 	}
 
 	for k, _ := range S.storeShards {
@@ -82,36 +89,34 @@ func (s *SharedStore) getShard(key string) *StoreShard {
 	return &s.storeShards[hShort]
 }
 
-func (s *SharedStore) Set(key string, e *MEntry) error {
-	if s.item_size_limit > 0 && s.item_size_limit < e.Size {
+func (s *SharedStore) Set(key string, entry *MEntry) error {
+	if s.item_size_limit > 0 && s.item_size_limit < entry.Size {
 		return fmt.Errorf("SERVER_ERROR object too large for cache")
 	}
 
-	e.atime = time.Now().UnixMicro()
+	entry.atime = time.Now().UnixMicro()
 	shard := s.getShard(key)
 
 	shard.Lock()
 	if shard.size > s.size_limit/uint64(s.shardsCount) {
 		shard.unsafeEvictItem()
 	}
-	shard.unsafeSet(e.Key, e)
+	shard.cas_s++
+	entry.Cas = shard.cas_s
+	old, ok := shard.h[key]
+	if !ok {
+		shard.count++
+		shard.size += uint64(entry.Size) + mEntrySize
+	} else {
+		s.ValuePool.Put(&old.Value)
+		shard.size -= uint64(old.Size)
+		shard.size += uint64(entry.Size)
+	}
+	shard.h[key] = *entry
+
 	shard.Unlock()
 
 	return nil
-}
-
-func (shard *StoreShard) unsafeSet(key string, entry *MEntry) {
-		shard.cas_s++
-		entry.Cas = shard.cas_s
-		old, ok := shard.h[key]
-		if !ok {
-			shard.count++
-			shard.size += uint64(entry.Size) + mEntrySize
-		} else {
-			shard.size -= uint64(old.Size)
-			shard.size += uint64(entry.Size)
-		}
-		shard.h[key] = *entry
 }
 
 func (s *SharedStore) Get(key string) (value *MEntry, ok bool) {
