@@ -2,10 +2,52 @@
 
 The Memcached server is written in Go for education goals a protocol-compatible implementation
 
-Base text protocol implemented, tested by: `memcapable -h 127.0.0.1 -p 11211 -a`
+Base text protocol implemented
+```
+memcapable -h 127.0.0.1 -p 11211 -a |& grep pass
+ascii version                           [pass]
+ascii quit                              [pass]
+ascii verbosity                         [pass]
+ascii set                               [pass]
+ascii set noreply                       [pass]
+ascii get                               [pass]
+ascii gets                              [pass]
+ascii mget                              [pass]
+ascii flush                             [pass]
+ascii flush noreply                     [pass]
+ascii add                               [pass]
+ascii add noreply                       [pass]
+ascii replace                           [pass]
+ascii replace noreply                   [pass]
+ascii cas                               [pass]
+ascii cas noreply                       [pass]
+ascii delete                            [pass]
+ascii delete noreply                    [pass]
+ascii incr                              [pass]
+ascii incr noreply                      [pass]
+ascii decr                              [pass]
+ascii decr noreply                      [pass]
+ascii append                            [pass]
+ascii append noreply                    [pass]
+ascii prepend                           [pass]
+ascii prepend noreply                   [pass]
+```
 
-Base binary protocol - in progress
-
+Base binary protocol
+```
+memcapable -h 127.0.0.1 -p 11211 -b |& grep pass
+binary noop                             [pass]
+binary quit                             [pass]
+binary quitq                            [pass]
+binary set                              [pass]
+binary setq                             [pass]
+binary flush                            [pass]
+binary flushq                           [pass]
+binary add                              [pass]
+binary addq                             [pass]
+binary get                              [pass]
+binary getq                             [pass]
+```
 # Performance
 
 Main performance issue is with `net.Conn.Write` is too slow on small requests.

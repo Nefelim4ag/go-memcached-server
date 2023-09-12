@@ -234,7 +234,7 @@ func (ctx *ASCIIProcessor) set_add_replace(command string, args []string) error 
             }
     }
 
-	err = ctx.store.Set(entry.Key, &entry, entry.Size)
+	err = ctx.store.Set(entry.Key, &entry)
 	if err!= nil {
 		return ctx.sendClientError(err.Error())
 	}
@@ -307,7 +307,7 @@ func (ctx *ASCIIProcessor) append_prepend(command string, args []string) error {
     }
 	entry.Size = uint32(len(entry.Value))
 
-	err = ctx.store.Set(entry.Key, &entry, entry.Size)
+	err = ctx.store.Set(entry.Key, &entry)
 	if err!= nil {
 		return ctx.sendClientError(err.Error())
 	}
@@ -384,7 +384,7 @@ func (ctx *ASCIIProcessor) cas(args []string) error {
 		return nil
 	}
 
-	err = ctx.store.Set(entry.Key, &entry, entry.Size)
+	err = ctx.store.Set(entry.Key, &entry)
 	if err!= nil {
 		return ctx.sendClientError(err.Error())
 	}
@@ -437,7 +437,7 @@ func (ctx *ASCIIProcessor) incr_decr(command string, args []string) error {
 
 	v.Value = []byte(fmt.Sprintf("%d", new_value))
 	v.Size = uint32(len(v.Value))
-	ctx.store.Set(key, v, uint32(v.Size))
+	ctx.store.Set(key, v)
 
 	if args[len(args) - 1] == "noreply" {
 		return nil
@@ -575,7 +575,7 @@ func (ctx *ASCIIProcessor) stats(args []string) error {
 // 		v := _v.(MemcachedEntry)
 // 		if ExpTime > 0 && exist {
 // 			v.ExpTime = uint32(ExpTime)
-// 			store.Set(key, v, v.len)
+// 			store.Set(key, v)
 // 			ctx.wb.Write([]byte("TOUCHED\r\n"))
 // 		} else {
 // 			ctx.wb.Write([]byte("NOT_FOUND\r\n"))

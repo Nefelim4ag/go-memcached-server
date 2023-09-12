@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/cespare/xxhash"
@@ -24,7 +25,6 @@ type (
 	}
 
 	StoreShard struct {
-		_ [64 - 40]byte
 		// 8 mutex + 16 rw mutex
 		sync.RWMutex
 		count uint64 // count of items in shard
@@ -32,6 +32,7 @@ type (
 		cas_s uint64 // cas source monotonically increasing
 		// 8 ? byte map pointer
 		h map[string]MEntry // map in shard
+		_ [8]byte
 	}
 
 	MEntry struct {
@@ -81,35 +82,36 @@ func (s *SharedStore) getShard(key string) *StoreShard {
 	return &s.storeShards[hShort]
 }
 
-func (s *SharedStore) Set(key string, e *MEntry, size uint32) error {
-	if s.item_size_limit > 0 && s.item_size_limit < size {
+func (s *SharedStore) Set(key string, e *MEntry) error {
+	if s.item_size_limit > 0 && s.item_size_limit < e.Size {
 		return fmt.Errorf("SERVER_ERROR object too large for cache")
 	}
 
+	e.atime = time.Now().UnixMicro()
 	shard := s.getShard(key)
-	if shard.size > s.size_limit/uint64(s.shardsCount) {
-		shard.evictItem()
-	}
-
-	e.atime	= time.Now().UnixMicro()
 
 	shard.Lock()
-	shard.cas_s++
-	e.Cas = shard.cas_s
-	old, ok := shard.h[key]
-	if !ok {
-		shard.count++
-		shard.size += uint64(size) + mEntrySize
-	} else {
-		if old.Size != size {
-			shard.size -= uint64(old.Size)
-			shard.size += uint64(size)
-		}
+	if shard.size > s.size_limit/uint64(s.shardsCount) {
+		shard.unsafeEvictItem()
 	}
-	shard.h[key] = *e
+	shard.unsafeSet(e.Key, e)
 	shard.Unlock()
 
 	return nil
+}
+
+func (shard *StoreShard) unsafeSet(key string, entry *MEntry) {
+		shard.cas_s++
+		entry.Cas = shard.cas_s
+		old, ok := shard.h[key]
+		if !ok {
+			shard.count++
+			shard.size += uint64(entry.Size) + mEntrySize
+		} else {
+			shard.size -= uint64(old.Size)
+			shard.size += uint64(entry.Size)
+		}
+		shard.h[key] = *entry
 }
 
 func (s *SharedStore) Get(key string) (value *MEntry, ok bool) {
@@ -153,7 +155,7 @@ func (s *SharedStore) Flush() {
 }
 
 func (s *SharedStore) SetMemoryLimit(limit uint64) {
-	s.size_limit = limit
+	atomic.StoreUint64(&s.size_limit, limit)
 }
 
 func (s *SharedStore) SetItemSizeLimit(limit uint32) {
@@ -180,16 +182,13 @@ func (shard *StoreShard) tryExpireRandItem(flush int64) (expired bool) {
 	return deleted
 }
 
-func (shard *StoreShard) evictItem() {
+func (shard *StoreShard) unsafeEvictItem() {
 	if shard.count == 0 {
-		shard.Lock()
 		shard.h = make(map[string]MEntry)
-		shard.Unlock()
 		return
 	}
 
 	batch_size := 1024
-	shard.Lock()
 	var oldest MEntry
 	for _, v := range shard.h {
 		if batch_size == 0 {
@@ -204,7 +203,6 @@ func (shard *StoreShard) evictItem() {
 	}
 
 	shard.unsafeDelete(oldest.Key, &oldest)
-	shard.Unlock()
 }
 
 func (s *SharedStore) LRUCrawler() {
@@ -239,8 +237,11 @@ func (s *SharedStore) LRUCrawler() {
 
 		for k, _ := range s.storeShards {
 			shard := &s.storeShards[k]
-			if shard.size > s.size_limit/uint64(s.shardsCount) {
-				shard.evictItem()
+			size_limit := atomic.LoadUint64(&s.size_limit)
+			if size_limit > 0 && shard.size > size_limit/uint64(s.shardsCount) {
+				shard.Lock()
+				shard.unsafeEvictItem()
+				shard.Unlock()
 			}
 		}
 
