@@ -2,7 +2,7 @@ package memstore
 
 import (
 	"fmt"
-	"runtime"
+	"nefelim4ag/go-memcached-server/recursemap"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -16,27 +16,23 @@ import (
 const mEntrySize = 44
 
 type (
+	// SharedStore is
 	SharedStore struct {
-		size_limit      uint64
-		item_size_limit uint32
-		shardsCount     uint32
-		flush           int64
-		ctime           int64
-		ValuePool       sync.Pool
-		storeShards     []StoreShard
+		storeSizeLimit uint64
+		itemSizeLimit  uint32
+
+		count  atomic.Int64
+		size   atomic.Int64
+		casSrc atomic.Uint64 // cas source monotonically increasing
+
+		flush     int64
+		ctime     int64
+		ValuePool sync.Pool
+
+		coolmap *recursemap.RootMap[MEntry]
 	}
 
-	StoreShard struct {
-		// 8 mutex + 16 rw mutex
-		sync.RWMutex
-		count uint64 // count of items in shard
-		size  uint64 // total size of items in shard
-		cas_s uint64 // cas source monotonically increasing
-		// 8 ? byte map pointer
-		h map[string]MEntry // map in shard
-		_ [8]byte
-	}
-
+	// MEntry is base memcached record
 	MEntry struct {
 		Flags   [4]byte
 		ExpTime uint32
@@ -49,83 +45,53 @@ type (
 	}
 )
 
-func NextPowOf2(n int) uint {
-	k := 1
-	for k < n {
-		k = k << 1
-	}
-	return uint(k)
-}
-
+// NewSharedStore init a new SharedStore
 func NewSharedStore() *SharedStore {
-	numCpu := uint32(NextPowOf2(runtime.NumCPU()))
 	S := SharedStore{
-		storeShards: make([]StoreShard, numCpu),
-		shardsCount: numCpu,
-		flush:       time.Now().UnixMicro(),
-		ctime:       time.Now().Unix(),
+		flush: time.Now().UnixMicro(),
+		ctime: time.Now().Unix(),
 		ValuePool: sync.Pool{
 			New: func() interface{} {
 				b := make([]byte, 8)
 				return &b
 			},
 		},
+		coolmap: recursemap.NewRecurseMap[MEntry](),
 	}
 
-	for k, _ := range S.storeShards {
-		S.storeShards[k].h = make(map[string]MEntry)
-	}
-
-	go S.LRUCrawler()
+	// go S.LRUCrawler()
 
 	return &S
 }
 
-func (s *SharedStore) getShard(key string) *StoreShard {
-	xxhash.New()
-	hShort := uint64(0)
-	h := xxhash.Sum64String(string(key))
-	hShort = h % uint64(s.shardsCount)
-
-	return &s.storeShards[hShort]
-}
-
+// Set set or update value in shared store
 func (s *SharedStore) Set(key string, entry *MEntry) error {
-	if s.item_size_limit > 0 && s.item_size_limit < entry.Size {
+	if s.itemSizeLimit > 0 && s.itemSizeLimit < entry.Size {
 		return fmt.Errorf("SERVER_ERROR object too large for cache")
 	}
 
 	entry.atime = time.Now().UnixMicro()
-	shard := s.getShard(key)
 
-	shard.Lock()
-	if shard.size > s.size_limit/uint64(s.shardsCount) {
-		shard.unsafeEvictItem()
-	}
-	shard.cas_s++
-	entry.Cas = shard.cas_s
-	old, ok := shard.h[key]
+	// if s.size.Load() > s.storeSizeLimit {
+	// 	s.unsafeEvictItem()
+	// }
+	s.casSrc.Add(1)
+	entry.Cas = s.casSrc.Load()
+	old, ok := s.coolmap.Set(key, entry)
 	if !ok {
-		shard.count++
-		shard.size += uint64(entry.Size) + mEntrySize
+		s.count.Add(1)
+		s.size.Add(int64(entry.Size) + mEntrySize)
 	} else {
 		s.ValuePool.Put(&old.Value)
-		shard.size -= uint64(old.Size)
-		shard.size += uint64(entry.Size)
+		s.size.Add(int64(entry.Size) - int64(old.Size))
 	}
-	shard.h[key] = *entry
-
-	shard.Unlock()
 
 	return nil
 }
 
+// Get return current value from store
 func (s *SharedStore) Get(key string) (value *MEntry, ok bool) {
-	shard := s.getShard(key)
-	shard.RLock()
-	defer shard.RUnlock()
-
-	e, ok := shard.h[key]
+	e, ok := s.coolmap.Get(key)
 	if ok {
 		if s.flush > e.atime {
 			return nil, false
@@ -140,20 +106,17 @@ func (s *SharedStore) Get(key string) (value *MEntry, ok bool) {
 		// updated.atime = time.Now().UnixMicro()
 		// shard.h[key] = updated
 		value := e
-		return &value, ok
+		return value, ok
 	}
 
 	return nil, false
 }
 
 func (s *SharedStore) Delete(key string) {
-	shard := s.getShard(key)
-	shard.Lock()
-	old, ok := shard.h[key]
+	old, ok := s.coolmap.Get(key)
 	if ok {
-		shard.unsafeDelete(old.Key, &old)
+		s.unsafeDelete(old.Key, old)
 	}
-	shard.Unlock()
 }
 
 func (s *SharedStore) Flush() {
@@ -161,96 +124,104 @@ func (s *SharedStore) Flush() {
 }
 
 func (s *SharedStore) SetMemoryLimit(limit uint64) {
-	atomic.StoreUint64(&s.size_limit, limit)
+	s.storeSizeLimit = limit
 }
 
 func (s *SharedStore) SetItemSizeLimit(limit uint32) {
-	s.item_size_limit = limit
+	s.itemSizeLimit = limit
 }
 
-func (shard *StoreShard) unsafeDelete(k string, v *MEntry) {
-	shard.count--
-	shard.size -= uint64(v.Size) - mEntrySize
-	delete(shard.h, k)
+func (s *SharedStore) unsafeDelete(k string, v *MEntry) {
+	s.count.Add(-1)
+	s.size.Add(-(int64(v.Size) + mEntrySize))
+	// delete(shard.h, k)
 }
 
-func (shard *StoreShard) tryExpireRandItem(flush int64) (expired bool) {
+func (s *SharedStore) tryExpireRandItem(flush int64) (expired bool) {
 	deleted := false
 
-	for k, v := range shard.h {
-		if flush > v.atime {
-			shard.unsafeDelete(k, &v)
-			deleted = true
-		}
-		break
-	}
+	// for k, v := range shard.h {
+	// 	if flush > v.atime {
+	// 		shard.unsafeDelete(k, &v)
+	// 		deleted = true
+	// 	}
+	// 	break
+	// }
 
 	return deleted
 }
 
-func (shard *StoreShard) unsafeEvictItem() {
-	if shard.count == 0 {
-		shard.h = make(map[string]MEntry)
-		return
-	}
+func (s *SharedStore) unsafeEvictItem() {
+	// if shard.count == 0 {
+	// 	shard.h = make(map[string]MEntry)
+	// 	return
+	// }
 
-	batch_size := 1024
-	var oldest MEntry
-	for _, v := range shard.h {
-		if batch_size == 0 {
-			break
-		}
+	// batch_size := 1024
+	// var oldest MEntry
+	// for _, v := range shard.h {
+	// 	if batch_size == 0 {
+	// 		break
+	// 	}
 
-		if v.atime < oldest.atime {
-			oldest = v
-		}
+	// 	if v.atime < oldest.atime {
+	// 		oldest = v
+	// 	}
 
-		batch_size--
-	}
+	// 	batch_size--
+	// }
 
-	shard.unsafeDelete(oldest.Key, &oldest)
+	// s.unsafeDelete(oldest.Key, &oldest)
 }
 
 func (s *SharedStore) LRUCrawler() {
-	last_flush := s.flush
+	// last_flush := s.flush
 
-	for {
-		s.ctime = time.Now().Unix()
+	// for {
+	// 	s.ctime = time.Now().Unix()
 
-		if last_flush < s.flush {
-			for k, _ := range s.storeShards {
-				shard := &s.storeShards[k]
-				items_count := shard.count
+	// 	if last_flush < s.flush {
+	// 		for k, _ := range s.storeShards {
+	// 			shard := &s.storeShards[k]
+	// 			items_count := shard.count
 
-				flush_expired := uint(0)
-				for items_count > 0 {
-					shard.Lock()
-					batch_size := min(1024, max(1, items_count/1024))
-					for i := uint64(0); i < batch_size; i++ {
-						if shard.tryExpireRandItem(s.flush) {
-							flush_expired++
-						}
-						items_count--
-					}
-					shard.Unlock()
-				}
+	// 			flush_expired := uint(0)
+	// 			for items_count > 0 {
+	// 				shard.Lock()
+	// 				batch_size := min(1024, max(1, items_count/1024))
+	// 				for i := uint64(0); i < batch_size; i++ {
+	// 					if shard.tryExpireRandItem(s.flush) {
+	// 						flush_expired++
+	// 					}
+	// 					items_count--
+	// 				}
+	// 				shard.Unlock()
+	// 			}
 
+<<<<<<< HEAD
 				slog.Info("memstore - flushed shard", "shard", k, slog.Uint64("time", uint64(flush_expired)))
 			}
 			last_flush = s.flush
 			runtime.GC()
 		}
+=======
+	// 			log.Infof("Flushed from shard %d: %d\n", k, flush_expired)
+	// 		}
+	// 		last_flush = s.flush
+	// 		runtime.GC()
+	// 	}
+>>>>>>> 6a73cbd (feat(server/newmap): It works1)
 
-		for k, _ := range s.storeShards {
-			shard := &s.storeShards[k]
-			size_limit := atomic.LoadUint64(&s.size_limit)
-			if size_limit > 0 && shard.size > size_limit/uint64(s.shardsCount) {
-				shard.Lock()
-				shard.unsafeEvictItem()
-				shard.Unlock()
-			}
-		}
+	// 	for k, _ := range s.storeShards {
+	// 		shard := &s.storeShards[k]
+	// 		size_limit := atomic.LoadUint64(&s.size_limit)
+	// 		if size_limit > 0 && shard.size > size_limit/uint64(s.shardsCount) {
+	// 			shard.Lock()
+	// 			shard.unsafeEvictItem()
+	// 			shard.Unlock()
+	// 		}
+	// 	}
 
-		time.Sleep(time.Second)
-	}
+	// 	time.Sleep(time.Second)
+	// }
 }

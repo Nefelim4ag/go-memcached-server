@@ -101,7 +101,8 @@ func (RR *RootMap[V]) travelTree(key string) (uint8, *leafNodeType[V]) {
 	return lower, Lnode
 }
 
-func (RR *RootMap[V]) Set(key string, value *V) {
+// Set upon return nil or old value
+func (RR *RootMap[V]) Set(key string, value *V) (*V, bool) {
 	offset, Lnode := RR.travelTree(key)
 	// Spinlock
 	Lnode.Lock()
@@ -111,14 +112,15 @@ func (RR *RootMap[V]) Set(key string, value *V) {
 		Lnode.entries[offset][0].key = key
 		Lnode.entries[offset][0].value = value
 		Lnode.Unlock()
-		return
+		return nil, false
 	}
 
 	for k, v := range Lnode.entries[offset] {
 		if v.key == key {
+			old := Lnode.entries[offset][k].value
 			Lnode.entries[offset][k].value = value
 			Lnode.Unlock()
-			return
+			return old, true
 		}
 	}
 
@@ -127,9 +129,11 @@ func (RR *RootMap[V]) Set(key string, value *V) {
 			Lnode.entries[offset][k].key = key
 			Lnode.entries[offset][k].value = value
 			Lnode.Unlock()
-			return
+			break
 		}
 	}
+
+	return nil, false
 }
 
 func (RR *RootMap[V]) Get(key string) (*V, bool) {
@@ -174,11 +178,14 @@ func (RR *RootMap[V]) Get(key string) (*V, bool) {
 		return nil, false
 	}
 
+	Lnode.Lock()
 	for _, v := range Lnode.entries[lower] {
 		if v.key == key {
+			Lnode.Unlock()
 			return v.value, true
 		}
 	}
+	Lnode.Unlock()
 
 	return nil, false
 }
