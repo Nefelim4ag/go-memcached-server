@@ -17,24 +17,24 @@ import (
 
 func BenchmarkStringMaps(b *testing.B) {
 	const keySz = 8
-	sizes := []int{1024}
+	sizes := []int{32768*8}
 	for _, n := range sizes {
 		b.Run("n="+strconv.Itoa(n), func(b *testing.B) {
-			// b.Run("runtime map", func(b *testing.B) {
-			// 	benchmarkRuntimeMap(b, genStringData(keySz, n))
-			// })
+			b.Run("runtime map", func(b *testing.B) {
+				benchmarkRuntimeMap(b, genStringData(keySz, n))
+			})
 			b.Run("Recurse.Map", func(b *testing.B) {
 				benchmarkCustomMap(b, genStringData(keySz, n))
 			})
-			b.Run("Recurse.Map 1W MR", func(b *testing.B) {
-				BenchmarkCustomMapWithWrites(b)
-			})
-			b.Run("haxmap 1W MR", func(b *testing.B) {
-				BenchmarkHaxMapWithWrites(b)
-			})
+			// b.Run("Recurse.Map 2W MR", func(b *testing.B) {
+			// 	BenchmarkCustomMapWithWrites(b)
+			// })
+			// b.Run("haxmap 1W MR", func(b *testing.B) {
+			// 	BenchmarkHaxMapWithWrites(b)
+			// })
 			// b.Run("haxmap", func(b *testing.B) {
-            //     benchmarkHaxMap(b, genStringData(keySz, n))
-            // })
+			//     benchmarkHaxMap(b, genStringData(keySz, n))
+			// })
 		})
 	}
 }
@@ -44,20 +44,18 @@ type fairLock struct {
 }
 
 func benchmarkRuntimeMap(b *testing.B, keys []string) {
-	n := uint32(len(keys))
-	mod := n - 1 // power of 2 fast modulus
-	require.Equal(b, 1, bits.OnesCount32(n))
+	n := len(keys)
 	m := make(map[string]string)
 	for _, k := range keys {
 		m[string(k)] = string(k)
 	}
+
 	b.ResetTimer()
-	l := fairLock{}
 	var ok bool
 	for i := 0; i < b.N; i++ {
-		l.Lock()
-		_, ok = m[string(keys[uint32(i) & mod])]
-		l.Unlock()
+		k := keys[i%n]
+		m[k] = k
+		_, ok = m[k]
 	}
 	assert.True(b, ok)
 	b.ReportAllocs()
@@ -67,54 +65,55 @@ func benchmarkHaxMap(b *testing.B, keys []string) {
 	n := uint32(len(keys))
 	mod := n - 1 // power of 2 fast modulus
 	require.Equal(b, 1, bits.OnesCount32(n))
-	m := haxmap.New[string,string]()
+	m := haxmap.New[string, string]()
 	for _, k := range keys {
 		m.Set(string(k), string(k))
 	}
 	b.ResetTimer()
 	var ok bool
 	for i := 0; i < b.N; i++ {
-		_, ok = m.Get(string(keys[uint32(i) & mod]))
+		_, ok = m.Get(string(keys[uint32(i)&mod]))
 	}
 	assert.True(b, ok)
 	b.ReportAllocs()
 }
 
 func benchmarkCustomMap(b *testing.B, keys []string) {
-	n := uint32(len(keys))
+	n := len(keys)
 	m := NewRecurseMap[string]()
 	for _, k := range keys {
 		v := string(k)
 		m.Set(string(k), &v)
 	}
+
 	b.ResetTimer()
 	var ok bool
 	for i := 0; i < b.N; i++ {
-		k := keys[uint32(i) % n]
-		v := string(k)
-		m.Set(string(k), &v)
-		_, ok = m.Get(string(k))
+		k := keys[i%n]
+		m.Set(k, &k)
+		_, ok = m.Get(k)
 	}
 	assert.True(b, ok)
 	b.ReportAllocs()
 }
 
 func BenchmarkCustomMapWithWrites(b *testing.B) {
-	keys := genStringData(8, 1024)
-	n := uint32(len(keys))
-	mod := n - 1 // power of 2 fast modulus
-	require.Equal(b, 1, bits.OnesCount32(n))
+	keys := genStringData(8, 8192)
+	// n := uint32(len(keys))
+	// mod := n - 1 // power of 2 fast modulus
+	// require.Equal(b, 1, bits.OnesCount32(n))
 
 	m := NewRecurseMap[string]()
-	for _, k := range keys {
-		v := string(k)
-		m.Set(string(k), &v)
-	}
-	var writer uintptr
+	// for _, k := range keys {
+	// 	v := string(k)
+	// 	m.Set(string(k), &v)
+	// }
+	var writer atomic.Int32
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
-		// use 1 thread as writer
-		if atomic.CompareAndSwapUintptr(&writer, 0, 1) {
+		// use 2 thread as writer
+		if writer.Load() < 2 {
+			writer.Add(1)
 			for pb.Next() {
 				for _, k := range keys {
 					v := string(k)
@@ -125,7 +124,7 @@ func BenchmarkCustomMapWithWrites(b *testing.B) {
 			for pb.Next() {
 				// var ok bool
 				for i := 0; i < b.N; i++ {
-					m.Get(string(keys[uint32(i) & mod]))
+					m.Get(string(keys[i % len(keys)]))
 				}
 			}
 		}
@@ -159,14 +158,13 @@ func BenchmarkHaxMapWithWrites(b *testing.B) {
 			for pb.Next() {
 				// var ok bool
 				for i := 0; i < b.N; i++ {
-					m.Get(string(keys[uint32(i) & mod]))
+					m.Get(string(keys[uint32(i)&mod]))
 				}
 			}
 		}
 	})
 	b.ReportAllocs()
 }
-
 
 // func TestMemoryFootprint(t *testing.T) {
 // 	t.Skip("unskip for memory footprint stats")
@@ -210,13 +208,63 @@ func genStringData(size, count int) (keys []string) {
 // 	return m / float64(len(samples))
 // }
 
-
 func TestSet(t *testing.T) {
+	usefulStrings := []string{
+		"foo",
+		"114",
+		"7855",
+		"165",
+		"374",
+		"foo",
+		"631",
+		"1134",
+		"1278",
+		"1523",
+		"1631",
+		"2345",
+		"foo",
+		"2532",
+		"2992",
+		"3075",
+		"3184",
+		"3620",
+		"3621",
+		"3654",
+		"3761",
+		"3871",
+		"4078",
+		"4466",
+		"4758",
+		"4993",
+		"5520",
+		"6136",
+		"6366",
+		"6477",
+		"6737",
+		"6890",
+		"7187",
+		"7257",
+		"7407",
+		"7461",
+		"8421",
+		"8450",
+		"8457",
+		"8621",
+		"8809",
+		"9591",
+		"9602",
+		"9634",
+	}
 	m := NewRecurseMap[string]()
 	if v, ok := m.Get("notExist"); ok {
 		t.Fatal("Expected not found", v)
 	}
+	a := "value"
+	for _, v := range usefulStrings {
+		m.Set(v, &a)
+	}
 	v := "bar"
+	m.Set("foo", &v)
 	m.Set("foo", &v)
 	if v, ok := m.Get("foo"); ok {
 		if *v != "bar" {
