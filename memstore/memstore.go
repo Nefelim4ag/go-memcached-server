@@ -29,7 +29,7 @@ type (
 		ctime     int64
 		ValuePool sync.Pool
 
-		coolmap *recursemap.RootMap[MEntry]
+		coolmap *recursemap.NodeType[MEntry]
 	}
 
 	// MEntry is base memcached record
