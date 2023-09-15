@@ -17,7 +17,7 @@ import (
 
 func BenchmarkStringMaps(b *testing.B) {
 	const keySz = 8
-	sizes := []int{32768*8}
+	sizes := []int{32768*16}
 	for _, n := range sizes {
 		b.Run("n="+strconv.Itoa(n), func(b *testing.B) {
 			b.Run("runtime map", func(b *testing.B) {
@@ -97,6 +97,70 @@ func benchmarkCustomMap(b *testing.B, keys []string) {
 	b.ReportAllocs()
 }
 
+func BenchmarkRuntimeMapWithWrites(b *testing.B) {
+	keys := genStringData(8, 8192)
+
+	m := make(map[string]string)
+
+	var writer atomic.Int32
+	l := &fairLock{}
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		// use 1 thread as writer
+		if writer.Load() < 1 {
+			writer.Add(1)
+			for pb.Next() {
+				for _, k := range keys {
+					l.Lock()
+					m[k] = k
+					l.Unlock()
+				}
+			}
+		} else {
+			for pb.Next() {
+				// var ok bool
+				for i := 0; i < b.N; i++ {
+					l.RLock()
+					_, ok := m[keys[i % len(keys)]]
+					l.RUnlock()
+					_ = ok
+				}
+			}
+		}
+	})
+	b.ReportAllocs()
+}
+
+func BenchmarkSyncMapWithWrites(b *testing.B) {
+	keys := genStringData(8, 8192)
+
+	m := sync.Map{}
+
+	var writer atomic.Int32
+
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		// use 1 thread as writer
+		if writer.Load() < 1 {
+			writer.Add(1)
+			for pb.Next() {
+				for _, k := range keys {
+					m.Store(k, k)
+				}
+			}
+		} else {
+			for pb.Next() {
+				// var ok bool
+				for i := 0; i < b.N; i++ {
+					_, ok := m.Load(keys[i % len(keys)])
+					_ = ok
+				}
+			}
+		}
+	})
+	b.ReportAllocs()
+}
+
 func BenchmarkCustomMapWithWrites(b *testing.B) {
 	keys := genStringData(8, 8192)
 	// n := uint32(len(keys))
@@ -111,20 +175,20 @@ func BenchmarkCustomMapWithWrites(b *testing.B) {
 	var writer atomic.Int32
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
-		// use 2 thread as writer
-		if writer.Load() < 2 {
+		// use 1 thread as writer
+		if writer.Load() < 1 {
 			writer.Add(1)
 			for pb.Next() {
 				for _, k := range keys {
-					v := string(k)
-					m.Set(string(k), &v)
+					v := k
+					m.Set(k, &v)
 				}
 			}
 		} else {
 			for pb.Next() {
 				// var ok bool
 				for i := 0; i < b.N; i++ {
-					m.Get(string(keys[i % len(keys)]))
+					m.Get(keys[i % len(keys)])
 				}
 			}
 		}

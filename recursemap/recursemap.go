@@ -6,7 +6,7 @@ import (
 	"sync/atomic"
 	"unsafe"
 
-	"github.com/cespare/xxhash"
+	"github.com/zeebo/xxh3"
 )
 
 type containerType int32
@@ -42,12 +42,11 @@ type (
 
 	entryType[V any] struct {
 		key string
-		// Racy of course
 		value atomic.Pointer[V]
 	}
 )
 
-// NewRecurseMap create empty recurse map
+// NewRecurseMap create empty recurse map, uses RCU, safe for 1 Writer only =(
 func NewRecurseMap[V any]() *NodeType[V] {
 	r := &NodeType[V]{
 		container: stemNode,
@@ -79,7 +78,7 @@ func (Node *NodeType[V]) grow(offset uint8, lvl uint8) *NodeType[V] {
 		var newOffset uint8
 		key := list[i].key
 		value := list[i].value.Load()
-		h := xxhash.Sum64String(key)
+		h := xxh3.HashString(key)
 		binary.BigEndian.PutUint64(unsafe.Slice(&hashRaw[0], 8), h)
 		if (lvl+1)%2 == 0 {
 			newOffset = hashRaw[(lvl+1)/2] >> 4
@@ -106,7 +105,7 @@ func (Node *NodeType[V]) grow(offset uint8, lvl uint8) *NodeType[V] {
 // travelTree create offset list and go deeper till the leafNode
 func (Node *NodeType[V]) travelTree(key string) (uint8, *leafNodeType[V]) {
 	var hashRaw [8]byte
-	h := xxhash.Sum64String(key)
+	h := xxh3.HashString(key)
 	binary.BigEndian.PutUint64(unsafe.Slice(&hashRaw[0], 8), h)
 	// fmt.Printf("%s: set hash %016x\n", key, hashRaw)
 
@@ -217,7 +216,7 @@ func (Node *leafNodeType[V]) set(offset uint8, key string, value *V) (*V, bool) 
 
 func (Node *NodeType[V]) Get(key string) (*V, bool) {
 	var hashRaw [8]byte
-	h := xxhash.Sum64String(key)
+	h := xxh3.HashString(key)
 	binary.BigEndian.PutUint64(unsafe.Slice(&hashRaw[0], 8), h)
 	// fmt.Printf("%s: get hash %016x\n", key, hashRaw)
 
