@@ -17,12 +17,12 @@ import (
 
 func BenchmarkStringMaps(b *testing.B) {
 	const keySz = 8
-	sizes := []int{32768*16}
+	sizes := []int{32768*8}
 	for _, n := range sizes {
 		b.Run("n="+strconv.Itoa(n), func(b *testing.B) {
-			b.Run("runtime map", func(b *testing.B) {
-				benchmarkRuntimeMap(b, genStringData(keySz, n))
-			})
+			// b.Run("runtime map", func(b *testing.B) {
+			// 	benchmarkRuntimeMap(b, genStringData(keySz, n))
+			// })
 			b.Run("Recurse.Map", func(b *testing.B) {
 				benchmarkCustomMap(b, genStringData(keySz, n))
 			})
@@ -121,7 +121,7 @@ func BenchmarkRuntimeMapWithWrites(b *testing.B) {
 				// var ok bool
 				for i := 0; i < b.N; i++ {
 					l.RLock()
-					_, ok := m[keys[i % len(keys)]]
+					_, ok := m[keys[i%len(keys)]]
 					l.RUnlock()
 					_ = ok
 				}
@@ -141,7 +141,7 @@ func BenchmarkSyncMapWithWrites(b *testing.B) {
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
 		// use 1 thread as writer
-		if writer.Load() < 1 {
+		if writer.Load() < 4 {
 			writer.Add(1)
 			for pb.Next() {
 				for _, k := range keys {
@@ -152,7 +152,7 @@ func BenchmarkSyncMapWithWrites(b *testing.B) {
 			for pb.Next() {
 				// var ok bool
 				for i := 0; i < b.N; i++ {
-					_, ok := m.Load(keys[i % len(keys)])
+					_, ok := m.Load(keys[i%len(keys)])
 					_ = ok
 				}
 			}
@@ -162,7 +162,7 @@ func BenchmarkSyncMapWithWrites(b *testing.B) {
 }
 
 func BenchmarkCustomMapWithWrites(b *testing.B) {
-	keys := genStringData(8, 8192)
+	keys := genStringData(8, 8192*4)
 	// n := uint32(len(keys))
 	// mod := n - 1 // power of 2 fast modulus
 	// require.Equal(b, 1, bits.OnesCount32(n))
@@ -176,7 +176,7 @@ func BenchmarkCustomMapWithWrites(b *testing.B) {
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
 		// use 1 thread as writer
-		if writer.Load() < 1 {
+		if writer.Load() < 4 {
 			writer.Add(1)
 			for pb.Next() {
 				for _, k := range keys {
@@ -188,7 +188,7 @@ func BenchmarkCustomMapWithWrites(b *testing.B) {
 			for pb.Next() {
 				// var ok bool
 				for i := 0; i < b.N; i++ {
-					m.Get(keys[i % len(keys)])
+					m.Get(keys[i%len(keys)])
 				}
 			}
 		}
@@ -318,6 +318,56 @@ func TestSet(t *testing.T) {
 		"9591",
 		"9602",
 		"9634",
+		"10626",
+		"10735",
+		"10797",
+		"10910",
+		"11218",
+		"11419",
+		"11846",
+		"11995",
+		"12195",
+		"12196",
+		"12283",
+		"12742",
+		"13226",
+		"13377",
+		"13707",
+		"13735",
+		"13801",
+		"14269",
+		"14471",
+		"15402",
+		"15588",
+		"15978",
+		"16018",
+		"16027",
+		"16143",
+		"16847",
+		"17224",
+		"17560",
+		"17592",
+		"17708",
+		"17922",
+		"18059",
+		"18072",
+		"18141",
+		"18326",
+		"18461",
+		"18482",
+		"18533",
+		"18897",
+		"18919",
+		"19189",
+		"19491",
+		"19902",
+		"20034",
+		"20503",
+		"20510",
+		"21183",
+		"21365",
+		"21621",
+		"21629",
 	}
 	m := NewRecurseMap[string]()
 	if v, ok := m.Get("notExist"); ok {
