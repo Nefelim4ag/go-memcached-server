@@ -24,6 +24,13 @@ type (
 		container containerType                   // Type read-only defined before first use
 		writeLock sync.Mutex                      // Not used
 		nodes     [16]atomic.Pointer[NodeType[V]] // Stupid as shit! Shitty! Fast and furious!
+		// Iterator data
+		iter      *iteratorState[V]
+	}
+
+	iteratorState[V any] struct {
+		offset    [16]int
+		lastLN    *listNodeType[V]
 	}
 
 	// Will be direct converted ... on condition? Not sure
@@ -289,4 +296,66 @@ func (Node *petalNodeType[V]) filterList(h uint64, lvl uint, key string) (*V, bo
 	}
 
 	return old, ok
+}
+
+// ForEach is generator, not thread safe, will return key and value or nil, nil, may be
+// It's not perfect at all.
+func (Node *NodeType[V]) ForEach() (*string, *V){
+	if Node.iter == nil {
+		Node.iter = &iteratorState[V]{}
+	}
+	offset := &Node.iter.offset
+	lastLN := &Node.iter.lastLN
+
+	// Finish current tail
+	if *lastLN != nil {
+		key, value := (*lastLN).record.key, (*lastLN).record.value.Load()
+		*lastLN = (*lastLN).next.Load()
+		return &key, value
+	}
+
+	dLvl := 0
+	cNode := Node
+	for dLvl = 0; dLvl < len(offset); dLvl++ {
+		nextNode := cNode.nodes[offset[dLvl]].Load()
+		wrap := false
+		for ; nextNode == nil && offset[dLvl] < 16 ; {
+			offset[dLvl]++
+			if offset[dLvl] >= len(cNode.nodes) {
+				offset[dLvl] = 0
+				if dLvl > 0 {
+					offset[dLvl-1] = (offset[dLvl-1] + 1) % len(cNode.nodes)
+					wrap = true
+					dLvl--
+				} else {
+					return nil, nil
+				}
+				break
+			}
+			nextNode = cNode.nodes[offset[dLvl]].Load()
+        }
+		if wrap {
+			continue
+		}
+
+		if cNode.container == petalNode {
+			pNode := (*petalNodeType[V])(unsafe.Pointer(cNode))
+            list := pNode.entries[offset[dLvl]].Load()
+			*lastLN = list.next.Load()
+			offset[dLvl]++
+			if offset[dLvl] >= len(pNode.entries) {
+				offset[dLvl] = 0
+				if dLvl > 0 {
+					offset[dLvl-1] = (offset[dLvl-1] + 1) % len(pNode.entries)
+				} else {
+					return nil, nil
+				}
+			}
+			return &list.record.key, list.record.value.Load()
+		}
+
+		cNode = cNode.nodes[offset[dLvl]].Load()
+	}
+
+	return nil, nil
 }
