@@ -386,7 +386,7 @@ func TestSet(t *testing.T) {
 	}
 
 	m.Set("foo", &v)
-	p, ok :=m.Delete("foo")
+	p, ok := m.Delete("foo")
 	if *p != v {
 		t.Fatalf("Expected %v, got %v", v, p)
 	}

@@ -37,12 +37,17 @@ type (
 	petalNodeType[V any] struct {
 		container containerType
 		size      int
-		entries   [16]atomic.Pointer[[]entryType[V]]
+		entries   [16]atomic.Pointer[listNodeType[V]]
 	}
 
 	entryType[V any] struct {
-		key string
+		key   string
 		value atomic.Pointer[V]
+	}
+
+	listNodeType[V any] struct {
+		record entryType[V]
+		next   atomic.Pointer[listNodeType[V]]
 	}
 )
 
@@ -56,7 +61,7 @@ func NewRecurseMap[V any]() *NodeType[V] {
 
 // Just get 4 bits no matter in which order we use hash, while we steel use it
 func getOffset(h uint64, lvl uint) uint {
-	return uint(h >> (60 - 4*lvl)) & 15
+	return uint(h>>(60-4*lvl)) & 15
 }
 
 // grow is real function which does tree grow
@@ -71,9 +76,10 @@ func (Node *leafNodeType[V]) splitChild(offset uint, lvl uint) {
 	newNode := NodeType[V]{}
 	for _, v := range pNode.entries {
 		if v.Load() != nil {
-			for _, value := range *v.Load() {
-				h := xxh3.HashString(value.key)
-				newNode.rSet(h, lvl+1, value.key, value.value.Load())
+			for ln := v.Load(); ln != nil; ln = ln.next.Load() {
+				key := ln.record.key
+				h := xxh3.HashString(key)
+				newNode.rSet(h, lvl+1, key, ln.record.value.Load())
 			}
 		}
 	}
@@ -87,7 +93,7 @@ func (Node *NodeType[V]) rSet(h uint64, lvl uint, key string, value *V) (*V, boo
 	Node.writeLock.Lock()
 
 	nextNode := Node.nodes[offset].Load()
-	if  nextNode == nil {
+	if nextNode == nil {
 		Lnode := (*leafNodeType[V])(unsafe.Pointer(Node))
 		Lnode.createSet(offset, h, lvl, key, value)
 		Node.writeLock.Unlock()
@@ -113,51 +119,57 @@ func (Node *NodeType[V]) Set(key string, value *V) (*V, bool) {
 
 func (Node *petalNodeType[V]) createList(h uint64, lvl uint, key string, value *V) {
 	offset := getOffset(h, lvl)
-    list := make([]entryType[V], 1, 8)
-	list[0].key = key
-	list[0].value.Store(value)
-    Node.entries[offset].Store(&list)
+	ln := listNodeType[V]{
+		record: entryType[V]{
+			key: key,
+		},
+	}
+	ln.record.value.Store(value)
+	Node.entries[offset].Store(&ln)
 }
 
 func (Node *leafNodeType[V]) createSet(offset uint, h uint64, lvl uint, key string, value *V) {
-		// fmt.Printf("%s: set offset %d - new petalNode\n", key, offset)
-		petalN := &petalNodeType[V]{
-			container: petalNode,
-			size: 1,
-		}
-		petalN.createList(h, lvl+1, key, value)
-		// fmt.Printf("%s: set offset %d, nil -> %p\n", key, offset, &list)
-		Node.entries[offset].Store(petalN)
+	// fmt.Printf("%s: set offset %d - new petalNode\n", key, offset)
+	petalN := &petalNodeType[V]{
+		container: petalNode,
+		size:      1,
+	}
+	petalN.createList(h, lvl+1, key, value)
+	// fmt.Printf("%s: set offset %d, nil -> %p\n", key, offset, &list)
+	Node.entries[offset].Store(petalN)
 }
 
 func (Node *petalNodeType[V]) updateList(h uint64, lvl uint, key string, value *V) (*V, bool) {
 	offset := getOffset(h, lvl)
 	list := Node.entries[offset].Load()
 	if list == nil {
-		list := make([]entryType[V], 1, 8)
-		list[0].key = key
-		list[0].value.Store(value)
-		Node.entries[offset].Store(&list)
+		Node.createList(h, lvl, key, value)
 		Node.size++
 		return nil, false
 	}
 
-	for k, v := range *list {
-		// fmt.Printf("%s: set offset %d - filter list index: %d\n", key, offset, i)
-		if v.key == key {
-			old := v.value.Load()
-			(*list)[k].value.Store(value)
+	last := list
+	for ln := list; ln != nil; ln = ln.next.Load() {
+		if ln.record.key == key {
+			old := ln.record.value.Load()
+			ln.record.value.Store(value)
 			return old, true
 		}
+		last = ln
 	}
 
-	// fmt.Printf("%s: set offset %d - list append\n", key, offset)
-	newEntry := entryType[V]{
-		key: key,
+	for last.next.Load() != nil {
+		last = last.next.Load()
 	}
-	newEntry.value.Store(value)
-	newList := append(*list, newEntry)
-	Node.entries[offset].Store(&newList)
+
+	ln := listNodeType[V]{
+		record: entryType[V]{
+			key: key,
+		},
+	}
+	ln.record.value.Store(value)
+
+	last.next.Store(&ln)
 	Node.size++
 
 	return nil, false
@@ -169,9 +181,9 @@ func (Node *leafNodeType[V]) updateSet(offset uint, h uint64, lvl uint, key stri
 		panic("last node in tree is not petal")
 	}
 	v, ok := pNode.updateList(h, lvl+1, key, value)
-	if pNode.size > len(pNode.entries) * 6 {
+	if pNode.size > len(pNode.entries)*6 {
 		// fmt.Printf("%s: set offset %d - grow\n", key, offset)
-        Node.splitChild(offset, lvl)
+		Node.splitChild(offset, lvl)
 	}
 	return v, ok
 }
@@ -181,23 +193,22 @@ func (Node *NodeType[V]) rGet(key string, h uint64, lvl uint) (*V, bool) {
 
 	if Node.container == petalNode {
 		pNode := (*petalNodeType[V])(unsafe.Pointer(Node))
-        list := pNode.entries[offset].Load()
+		list := pNode.entries[offset].Load()
 		if list == nil {
 			return nil, false
 		}
-        for _, v := range *list {
-            // fmt.Printf("%s: set offset %d - filter list index: %d\n", key, offset, i)
-            if v.key == key {
-                return v.value.Load(), true
-            }
-        }
-        return nil, false
+		for ln := list; ln != nil; ln = ln.next.Load() {
+			if ln.record.key == key {
+				return ln.record.value.Load(), true
+			}
+		}
+		return nil, false
 	}
 
 	retNode := Node.nodes[offset].Load()
 	if retNode == nil {
-        return nil, false
-    }
+		return nil, false
+	}
 
 	return retNode.rGet(key, h, lvl+1)
 }
@@ -207,8 +218,8 @@ func (Node *NodeType[V]) Get(key string) (*V, bool) {
 	offset := getOffset(h, 0)
 	retNode := Node.nodes[offset].Load()
 	if retNode == nil {
-        return nil, false
-    }
+		return nil, false
+	}
 
 	return (*retNode).rGet(key, h, 1)
 }
@@ -224,7 +235,7 @@ func (Node *NodeType[V]) rDelete(h uint64, lvl uint, key string) (*V, bool) {
 	Node.writeLock.Lock()
 
 	nextNode := Node.nodes[offset].Load()
-	if  nextNode == nil {
+	if nextNode == nil {
 		return nil, false
 	}
 
@@ -255,16 +266,27 @@ func (Node *petalNodeType[V]) filterList(h uint64, lvl uint, key string) (*V, bo
 		return nil, false
 	}
 
-	for k, v := range *list {
-		// fmt.Printf("%s: set offset %d - filter list index: %d\n", key, offset, i)
-		if v.key == key {
-			old := v.value.Load()
-			newList := append((*list)[:k], (*list)[k+1:]...)
-			Node.entries[offset].Store(&newList)
+	var old *V
+	ok := false
+	prevNode := list
+	ln := list
+	for ; ln != nil; ln = ln.next.Load() {
+		if ln.record.key == key {
+			old = ln.record.value.Load()
+			ok = true
 			Node.size--
-			return old, true
+			break
 		}
+		prevNode = ln
 	}
 
-	return nil, false
+	// Fisrt node
+	if Node.entries[offset].Load() == ln {
+		Node.entries[offset].Store(ln.next.Load())
+	} else {
+		// Remove for middle or tail
+		prevNode.next.Store(ln.next.Load())
+	}
+
+	return old, ok
 }
