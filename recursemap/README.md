@@ -1,3 +1,32 @@
+## Basic Idea
+Just use prefix tree, dinamically grown from start of the hash, to avoid overload slice filtering.
+
+Hash 0x0b3f of `str`
+```
+Root
+[0] [1] [2] [3] [4] [5] [6] [7] [8] [9] [a] [b] [c] [d] [e] [f]
+ |
+\ /
+First Child
+[0] [1] [2] [3] [4] [5] [6] [7] [8] [9] [a] [b] [c] [d] [e] [f]
+                                             |
+                                            \ /
+                                        child second
+[0] [1] [2] [3] [4] [5] [6] [7] [8] [9] [a] [b] [c] [d] [e] [f]
+             |
+            \ /
+        child third
+[0] [1] [2] [3] [4] [5] [6] [7] [8] [9] [a] [b] [c] [d] [e] [f]
+                                                             |
+                                                            \ /
+                                                            leaf
+                                                            {key: str, value: ...}
+```
+
+
+This is not space efficient or fastest, it just stupid simple and fast enough
+Allow to make RCU read by atomic pointers and *simple locks for writing*
+
 ## Benchmarks
 
 ```
