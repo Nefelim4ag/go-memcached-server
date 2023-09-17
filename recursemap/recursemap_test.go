@@ -98,7 +98,7 @@ func benchmarkCustomMap(b *testing.B, keys []string) {
 }
 
 func BenchmarkRuntimeMapWithWrites(b *testing.B) {
-	keys := genStringData(8, 8192)
+	keys := genStringData(8, 8192*4)
 
 	m := make(map[string]string)
 
@@ -106,8 +106,7 @@ func BenchmarkRuntimeMapWithWrites(b *testing.B) {
 	l := &fairLock{}
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
-		// use 1 thread as writer
-		if writer.Load() < 1 {
+		if writer.Load() < 2 {
 			writer.Add(1)
 			for pb.Next() {
 				for _, k := range keys {
@@ -132,7 +131,7 @@ func BenchmarkRuntimeMapWithWrites(b *testing.B) {
 }
 
 func BenchmarkSyncMapWithWrites(b *testing.B) {
-	keys := genStringData(8, 8192)
+	keys := genStringData(8, 8192*4)
 
 	m := sync.Map{}
 
@@ -140,8 +139,7 @@ func BenchmarkSyncMapWithWrites(b *testing.B) {
 
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
-		// use 1 thread as writer
-		if writer.Load() < 4 {
+		if writer.Load() < 2 {
 			writer.Add(1)
 			for pb.Next() {
 				for _, k := range keys {
@@ -175,8 +173,7 @@ func BenchmarkCustomMapWithWrites(b *testing.B) {
 	var writer atomic.Int32
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
-		// use 1 thread as writer
-		if writer.Load() < 4 {
+		if writer.Load() < 2 {
 			writer.Add(1)
 			for pb.Next() {
 				for _, k := range keys {
@@ -386,5 +383,15 @@ func TestSet(t *testing.T) {
 		}
 	} else {
 		t.Fatal("Key foo not found")
+	}
+
+	m.Set("foo", &v)
+	p, ok :=m.Delete("foo")
+	if *p != v {
+		t.Fatalf("Expected %v, got %v", v, p)
+	}
+	p, ok = m.Get("foo")
+	if p != nil || ok {
+		t.Fatal("Delete not works")
 	}
 }

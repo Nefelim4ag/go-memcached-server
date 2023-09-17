@@ -89,14 +89,14 @@ func (Node *NodeType[V]) rSet(h uint64, lvl uint, key string, value *V) (*V, boo
 	nextNode := Node.nodes[offset].Load()
 	if  nextNode == nil {
 		Lnode := (*leafNodeType[V])(unsafe.Pointer(Node))
-		Lnode.createSet(h, lvl, key, value)
+		Lnode.createSet(offset, h, lvl, key, value)
 		Node.writeLock.Unlock()
 		return nil, false
 	}
 
 	if nextNode.container == petalNode {
 		Lnode := (*leafNodeType[V])(unsafe.Pointer(Node))
-		v, ok := Lnode.updateSet(h, lvl, key, value)
+		v, ok := Lnode.updateSet(offset, h, lvl, key, value)
 		Node.writeLock.Unlock()
 		return v, ok
 	}
@@ -105,6 +105,7 @@ func (Node *NodeType[V]) rSet(h uint64, lvl uint, key string, value *V) (*V, boo
 	return nextNode.rSet(h, lvl+1, key, value)
 }
 
+// Set returns old value or nil
 func (Node *NodeType[V]) Set(key string, value *V) (*V, bool) {
 	h := xxh3.HashString(key)
 	return Node.rSet(h, 0, key, value)
@@ -118,8 +119,7 @@ func (Node *petalNodeType[V]) createList(h uint64, lvl uint, key string, value *
     Node.entries[offset].Store(&list)
 }
 
-func (Node *leafNodeType[V]) createSet(h uint64, lvl uint, key string, value *V) {
-		offset := getOffset(h, lvl)
+func (Node *leafNodeType[V]) createSet(offset uint, h uint64, lvl uint, key string, value *V) {
 		// fmt.Printf("%s: set offset %d - new petalNode\n", key, offset)
 		petalN := &petalNodeType[V]{
 			container: petalNode,
@@ -147,7 +147,7 @@ func (Node *petalNodeType[V]) updateList(h uint64, lvl uint, key string, value *
 		if v.key == key {
 			old := v.value.Load()
 			(*list)[k].value.Store(value)
-			return old, false
+			return old, true
 		}
 	}
 
@@ -163,9 +163,7 @@ func (Node *petalNodeType[V]) updateList(h uint64, lvl uint, key string, value *
 	return nil, false
 }
 
-// set Does internal set stuff like thread counting, grow, replace
-func (Node *leafNodeType[V]) updateSet(h uint64, lvl uint, key string, value *V) (*V, bool) {
-	offset := getOffset(h, lvl)
+func (Node *leafNodeType[V]) updateSet(offset uint, h uint64, lvl uint, key string, value *V) (*V, bool) {
 	pNode := Node.entries[offset].Load()
 	if pNode.container != petalNode {
 		panic("last node in tree is not petal")
@@ -213,4 +211,60 @@ func (Node *NodeType[V]) Get(key string) (*V, bool) {
     }
 
 	return (*retNode).rGet(key, h, 1)
+}
+
+// Delete returns old value or nil
+func (Node *NodeType[V]) Delete(key string) (*V, bool) {
+	h := xxh3.HashString(key)
+	return Node.rDelete(h, 0, key)
+}
+
+func (Node *NodeType[V]) rDelete(h uint64, lvl uint, key string) (*V, bool) {
+	offset := getOffset(h, lvl)
+	Node.writeLock.Lock()
+
+	nextNode := Node.nodes[offset].Load()
+	if  nextNode == nil {
+		return nil, false
+	}
+
+	if nextNode.container == petalNode {
+		Lnode := (*leafNodeType[V])(unsafe.Pointer(Node))
+		v, ok := Lnode.filterSet(offset, h, lvl, key)
+		Node.writeLock.Unlock()
+		return v, ok
+	}
+
+	Node.writeLock.Unlock()
+	return nextNode.rDelete(h, lvl+1, key)
+}
+
+func (Node *leafNodeType[V]) filterSet(offset uint, h uint64, lvl uint, key string) (*V, bool) {
+	pNode := Node.entries[offset].Load()
+	if pNode.container != petalNode {
+		panic("last node in tree is not petal")
+	}
+	v, ok := pNode.filterList(h, lvl+1, key)
+	return v, ok
+}
+
+func (Node *petalNodeType[V]) filterList(h uint64, lvl uint, key string) (*V, bool) {
+	offset := getOffset(h, lvl)
+	list := Node.entries[offset].Load()
+	if list == nil {
+		return nil, false
+	}
+
+	for k, v := range *list {
+		// fmt.Printf("%s: set offset %d - filter list index: %d\n", key, offset, i)
+		if v.key == key {
+			old := v.value.Load()
+			newList := append((*list)[:k], (*list)[k+1:]...)
+			Node.entries[offset].Store(&newList)
+			Node.size--
+			return old, true
+		}
+	}
+
+	return nil, false
 }
