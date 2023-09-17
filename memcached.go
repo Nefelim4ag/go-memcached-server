@@ -35,8 +35,8 @@ func (mS *memcachedServer) ConnectionHandler(conn *net.TCPConn, err error) {
 }
 
 func main() {
-	_memstoreSize := flag.Uint64("m", 512, "items memory in megabytes, default is 512")
-	_memstoreItemSize := flag.Uint("I", 1024*1024, "max item sizem, default is 1m")
+	rawMemstoreSize := flag.Uint64("m", 512, "items memory in megabytes, default is 512")
+	rawMemstoreItemSize := flag.Uint("I", 1024*1024, "max item sizem, default is 1m")
 	logLevel := flag.Int("loglevel", 3, "log level, 4=debug, 3=info, 2=warning, 1=error")
 	pprof := flag.Bool("pprof", false, "enable pprof server")
 	flag.Parse()
@@ -63,8 +63,8 @@ func main() {
 	logger := slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: programLevel})
 	slog.SetDefault(slog.New(logger))
 
-	memstoreSize := uint64(*_memstoreSize) * 1024 * 1024
-	memstoreItemSize := uint32(*_memstoreItemSize)
+	memstoreSize := int64(*rawMemstoreSize) * 1024 * 1024
+	memstoreItemSize := int32(*rawMemstoreItemSize)
 
 	// Wait for a SIGINT or SIGTERM signal to gracefully shut down the server
 	sigChan := make(chan os.Signal, 1)
