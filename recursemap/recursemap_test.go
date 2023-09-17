@@ -3,12 +3,14 @@ package recursemap
 // run with: $ go test --bench=. -test.benchmem .
 // @see https://twitter.com/karlseguin/status/524452778093977600
 import (
+	"fmt"
 	"math/bits"
 	"math/rand"
 	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/alphadose/haxmap"
 	"github.com/stretchr/testify/assert"
@@ -269,7 +271,7 @@ func genStringData(size, count int) (keys []string) {
 // 	return m / float64(len(samples))
 // }
 
-func TestSet(t *testing.T) {
+func TestMultiSet(t *testing.T) {
 	usefulStrings := []string{
 		"foo",
 		"114",
@@ -374,6 +376,28 @@ func TestSet(t *testing.T) {
 	for _, v := range usefulStrings {
 		m.Set(v, &a)
 	}
+
+	newList := make(map[string]any, 0)
+
+	m.Set("foo", &a)
+	count := 0
+	for k, _ := m.ForEach(); count < len(usefulStrings); k, _ = m.ForEach() {
+		if k != nil {
+			newList[*k] = nil
+		}
+		count++
+		time.Sleep(time.Microsecond * 200)
+	}
+
+	for k := range newList {
+		if _, ok := m.Get(k); !ok {
+			fmt.Printf("Can't find %s\n", k)
+		}
+	}
+}
+
+func TestSetGet(t *testing.T) {
+	m := NewRecurseMap[string]()
 	v := "bar"
 	m.Set("foo", &v)
 	m.Set("foo", &v)
@@ -384,7 +408,11 @@ func TestSet(t *testing.T) {
 	} else {
 		t.Fatal("Key foo not found")
 	}
+}
 
+func TestSetDelete(t *testing.T) {
+	m := NewRecurseMap[string]()
+	v := "bar"
 	m.Set("foo", &v)
 	p, ok := m.Delete("foo")
 	if *p != v {
