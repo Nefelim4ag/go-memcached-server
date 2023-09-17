@@ -1,7 +1,6 @@
 package recursemap
 
 import (
-	"encoding/binary"
 	"sync"
 	"sync/atomic"
 	"unsafe"
@@ -37,7 +36,8 @@ type (
 
 	petalNodeType[V any] struct {
 		container containerType
-		entries   atomic.Pointer[[]entryType[V]]
+		size      int
+		entries   [16]atomic.Pointer[[]entryType[V]]
 	}
 
 	entryType[V any] struct {
@@ -54,228 +54,163 @@ func NewRecurseMap[V any]() *NodeType[V] {
 	return r
 }
 
+// Just get 4 bits no matter in which order we use hash, while we steel use it
+func getOffset(h uint64, lvl uint) uint {
+	return uint(h >> (60 - 4*lvl)) & 15
+}
+
 // grow is real function which does tree grow
-func (Node *NodeType[V]) grow(offset uint8, lvl uint8) *NodeType[V] {
-	// Read all values in slice, create new node and replace old pointer with new
-	// Rebalance
-	// fmt.Printf("Split node\n")
-	var hashRaw [8]byte
-
-	Lnode := (*leafNodeType[V])(unsafe.Pointer(Node))
-	Lnode.container = leafNode
-
-	newNode := leafNodeType[V]{}
+func (Node *leafNodeType[V]) splitChild(offset uint, lvl uint) {
 	// Child is petal node now, we want convert it to new leaf node
-	child := Node.nodes[offset].Load()
+	if lvl == 15 {
+		// Hash too short... really?!
+		return
+	}
+	child := Node.entries[offset].Load()
 	pNode := (*petalNodeType[V])(unsafe.Pointer(child))
-	list := *pNode.entries.Load()
-	for i := 0; i < len(list); i++ {
-		var newOffset uint8
-		key := list[i].key
-		value := list[i].value.Load()
-		h := xxh3.HashString(key)
-		binary.BigEndian.PutUint64(unsafe.Slice(&hashRaw[0], 8), h)
-		if (lvl+1)%2 == 0 {
-			newOffset = hashRaw[(lvl+1)/2] >> 4
-		} else {
-			newOffset = hashRaw[(lvl+1)/2] & 15
-		}
-		newNode.setFast(newOffset, key, value)
-	}
-
-	newChild := (*NodeType[V])(unsafe.Pointer(&newNode))
-	// fmt.Printf("Replace Petal with Leaf: %p -> %p\n", child, newChild)
-	Node.nodes[offset].Store(newChild)
-
-	return Node.nodes[offset].Load()
-}
-
-// travelTree create offset list and go deeper till the leafNode
-func (Node *NodeType[V]) travelTree(key string, value *V) (*V, bool) {
-	var hashRaw [8]byte
-	h := xxh3.HashString(key)
-	binary.BigEndian.PutUint64(unsafe.Slice(&hashRaw[0], 8), h)
-	// fmt.Printf("%s: set hash %016x\n", key, hashRaw)
-	retNode := Node
-	offset := uint8(0)
-	for i := uint8(0); i < 16; i++ {
-		if i%2 == 0 {
-			offset = hashRaw[i/2] >> 4
-		} else {
-			offset = hashRaw[i/2] & 15
-		}
-		// fmt.Printf("%s: set ~ lvl %d offset %d, retNode %p, data: %+v\n", key, i, offset, retNode, retNode)
-		nextNode := retNode.nodes[offset].Load()
-		// Next node is not exists, so current is LeafNode, value will be created below in "set"
-		if nextNode == nil {
-			break
-		}
-
-		if nextNode.container == stemNode {
-            retNode = retNode.nodes[offset].Load()
-            continue
-        }
-
-		// Next node is petalNode, so current is LeafNode
-		pNode := (*petalNodeType[V])(unsafe.Pointer(nextNode))
-		plist := pNode.entries.Load()
-		list := *plist
-		if len(list) > 15 {
-			retNode.writeLock.Lock()
-			retNodeNew := retNode.grow(offset, i)
-			retNode.writeLock.Unlock()
-			retNode = retNodeNew
-			continue
-		}
-		break
-	}
-
-	Lnode := (*leafNodeType[V])(unsafe.Pointer(retNode))
-	// fmt.Printf("%s: set offset %d, lNode %p, data: %+v\n", key, offset, Lnode, Lnode)
-	retNode.writeLock.Lock()
-	v, ok := Lnode.set(offset, key, value)
-	retNode.writeLock.Unlock()
-	return v, ok
-}
-
-func (Node *NodeType[V]) Set(key string, value *V) (*V, bool) {
-	v, ok := Node.travelTree(key, value)
-
-	// fmt.Printf("\n")
-	return v, ok
-}
-
-// set Does internal set stuff like thread counting, grow, replace
-func (Node *leafNodeType[V]) set(offset uint8, key string, value *V) (*V, bool) {
-	for Node.entries[offset].Load() == nil {
-		// fmt.Printf("%s: set offset %d - new petalNode\n", key, offset)
-		list := make([]entryType[V], 1)
-		list[0].key = key
-		list[0].value.Store(value)
-		petalN := &petalNodeType[V]{
-			container: petalNode,
-		}
-		petalN.entries.Store(&list)
-
-		// fmt.Printf("%s: set offset %d, nil -> %p\n", key, offset, &list)
-		if Node.entries[offset].CompareAndSwap(nil, petalN) {
-			return nil, false
-		}
-	}
-
-	// Go deeper
-	pNode := Node.entries[offset].Load()
-	if pNode.container != petalNode {
-		panic("last node in tree is not petal")
-	}
-	plist := pNode.entries.Load()
-	list := *plist
-	for i := 0; i < len(list); i++ {
-		// fmt.Printf("%s: set offset %d - filter list index: %d\n", key, offset, i)
-		if list[i].key == key {
-			old := list[i].value.Load()
-			list[i].value.Store(value)
-			// Check list is not appended, or retry
-			if pNode.entries.Load() != plist {
-				plist = pNode.entries.Load()
-				i = 0 // retry
-				continue
-			} else {
-				return old, false
+	newNode := NodeType[V]{}
+	for _, v := range pNode.entries {
+		if v.Load() != nil {
+			for _, value := range *v.Load() {
+				h := xxh3.HashString(value.key)
+				newNode.rSet(h, lvl+1, value.key, value.value.Load())
 			}
 		}
 	}
-
-	// Value not exists in list, RCU append
-	for {
-		// fmt.Printf("%s: set offset %d - list append\n", key, offset)
-		plist := pNode.entries.Load()
-		list := *plist
-		newList := make([]entryType[V], len(list)+1)
-		copy(newList, list)
-		newList[len(list)].key = key
-		newList[len(list)].value.Store(value)
-		if pNode.entries.CompareAndSwap(plist, &newList) {
-			return nil, false
-		}
-	}
+	cNode := (*NodeType[V])(unsafe.Pointer(Node))
+	// fmt.Printf("Replace Petal with Leaf: %p -> %p\n", child, newChild)
+	cNode.nodes[offset].Store(&newNode)
 }
 
-func (Node *leafNodeType[V]) setFast(offset uint8, key string, value *V) {
-	if Node.entries[offset].Load() == nil {
-		// fmt.Printf("%s: set offset %d - new petalNode\n", key, offset)
-		list := make([]entryType[V], 1)
-		list[0].key = key
-		list[0].value.Store(value)
-		petalN := &petalNodeType[V]{
-			container: petalNode,
-		}
-		petalN.entries.Store(&list)
+func (Node *NodeType[V]) rSet(h uint64, lvl uint, key string, value *V) (*V, bool) {
+	offset := getOffset(h, lvl)
+	Node.writeLock.Lock()
 
-		// fmt.Printf("%s: set offset %d, nil -> %p\n", key, offset, &list)
-		Node.entries[offset].Store(petalN)
-		return
+	nextNode := Node.nodes[offset].Load()
+	if  nextNode == nil {
+		Lnode := (*leafNodeType[V])(unsafe.Pointer(Node))
+		Lnode.createSet(h, lvl, key, value)
+		Node.writeLock.Unlock()
+		return nil, false
 	}
 
-	// Go deeper
-	pNode := Node.entries[offset].Load()
-	plist := pNode.entries.Load()
-	list := *plist
-	for i := 0; i < len(list); i++ {
+	if nextNode.container == petalNode {
+		Lnode := (*leafNodeType[V])(unsafe.Pointer(Node))
+		v, ok := Lnode.updateSet(h, lvl, key, value)
+		Node.writeLock.Unlock()
+		return v, ok
+	}
+
+	Node.writeLock.Unlock()
+	return nextNode.rSet(h, lvl+1, key, value)
+}
+
+func (Node *NodeType[V]) Set(key string, value *V) (*V, bool) {
+	h := xxh3.HashString(key)
+	return Node.rSet(h, 0, key, value)
+}
+
+func (Node *petalNodeType[V]) createList(h uint64, lvl uint, key string, value *V) {
+	offset := getOffset(h, lvl)
+    list := make([]entryType[V], 1, 8)
+	list[0].key = key
+	list[0].value.Store(value)
+    Node.entries[offset].Store(&list)
+}
+
+func (Node *leafNodeType[V]) createSet(h uint64, lvl uint, key string, value *V) {
+		offset := getOffset(h, lvl)
+		// fmt.Printf("%s: set offset %d - new petalNode\n", key, offset)
+		petalN := &petalNodeType[V]{
+			container: petalNode,
+			size: 1,
+		}
+		petalN.createList(h, lvl+1, key, value)
+		// fmt.Printf("%s: set offset %d, nil -> %p\n", key, offset, &list)
+		Node.entries[offset].Store(petalN)
+}
+
+func (Node *petalNodeType[V]) updateList(h uint64, lvl uint, key string, value *V) (*V, bool) {
+	offset := getOffset(h, lvl)
+	list := Node.entries[offset].Load()
+	if list == nil {
+		list := make([]entryType[V], 1, 8)
+		list[0].key = key
+		list[0].value.Store(value)
+		Node.entries[offset].Store(&list)
+		Node.size++
+		return nil, false
+	}
+
+	for k, v := range *list {
 		// fmt.Printf("%s: set offset %d - filter list index: %d\n", key, offset, i)
-		if list[i].key == key {
-			list[i].value.Store(value)
-			return
+		if v.key == key {
+			old := v.value.Load()
+			(*list)[k].value.Store(value)
+			return old, false
 		}
 	}
 
 	// fmt.Printf("%s: set offset %d - list append\n", key, offset)
-	newList := make([]entryType[V], len(list)+1)
-	copy(newList, list)
-	newList[len(list)].key = key
-	newList[len(list)].value.Store(value)
-	pNode.entries.Store(&newList)
+	newEntry := entryType[V]{
+		key: key,
+	}
+	newEntry.value.Store(value)
+	newList := append(*list, newEntry)
+	Node.entries[offset].Store(&newList)
+	Node.size++
+
+	return nil, false
+}
+
+// set Does internal set stuff like thread counting, grow, replace
+func (Node *leafNodeType[V]) updateSet(h uint64, lvl uint, key string, value *V) (*V, bool) {
+	offset := getOffset(h, lvl)
+	pNode := Node.entries[offset].Load()
+	if pNode.container != petalNode {
+		panic("last node in tree is not petal")
+	}
+	v, ok := pNode.updateList(h, lvl+1, key, value)
+	if pNode.size > len(pNode.entries) * 6 {
+		// fmt.Printf("%s: set offset %d - grow\n", key, offset)
+        Node.splitChild(offset, lvl)
+	}
+	return v, ok
+}
+
+func (Node *NodeType[V]) rGet(key string, h uint64, lvl uint) (*V, bool) {
+	offset := getOffset(h, lvl)
+
+	if Node.container == petalNode {
+		pNode := (*petalNodeType[V])(unsafe.Pointer(Node))
+        list := pNode.entries[offset].Load()
+		if list == nil {
+			return nil, false
+		}
+        for _, v := range *list {
+            // fmt.Printf("%s: set offset %d - filter list index: %d\n", key, offset, i)
+            if v.key == key {
+                return v.value.Load(), true
+            }
+        }
+        return nil, false
+	}
+
+	retNode := Node.nodes[offset].Load()
+	if retNode == nil {
+        return nil, false
+    }
+
+	return retNode.rGet(key, h, lvl+1)
 }
 
 func (Node *NodeType[V]) Get(key string) (*V, bool) {
-	var hashRaw [8]byte
 	h := xxh3.HashString(key)
-	binary.BigEndian.PutUint64(unsafe.Slice(&hashRaw[0], 8), h)
-	// fmt.Printf("%s: get hash %016x\n", key, hashRaw)
+	offset := getOffset(h, 0)
+	retNode := Node.nodes[offset].Load()
+	if retNode == nil {
+        return nil, false
+    }
 
-	retNode := Node
-	offset := uint8(0)
-	for i := 0; i < 16; i++ {
-		if i%2 == 0 {
-			offset = hashRaw[i/2] >> 4
-		} else {
-			offset = hashRaw[i/2] & 15
-		}
-		if retNode == nil {
-			return nil, false
-		}
-		container := retNode.container
-
-		if container != petalNode{
-			// fmt.Printf("%s: set ~ lvl %d offset %d, retNode %p, data: %+v\n", key, i, offset, retNode, retNode)
-			retNode = retNode.nodes[offset].Load()
-		} else {
-			break
-		}
-	}
-
-	pNode := (*petalNodeType[V])(unsafe.Pointer(retNode))
-	// fmt.Printf("%s: get offset %d, petalNode %p, data: %+v\n", key, offset, pNode, pNode)
-	plist := pNode.entries.Load()
-	if plist == nil {
-		return nil, false
-	}
-	list := *plist
-	for i := 0; i < len(list); i++ {
-		if list[i].key == key {
-			return list[i].value.Load(), true
-		}
-	}
-
-	return nil, false
+	return (*retNode).rGet(key, h, 1)
 }
