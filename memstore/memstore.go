@@ -18,8 +18,8 @@ const mEntrySize = 44
 type (
 	// SharedStore is
 	SharedStore struct {
-		storeSizeLimit uint64
-		itemSizeLimit  uint32
+		storeSizeLimit int64
+		itemSizeLimit  int32
 
 		count  atomic.Int64
 		size   atomic.Int64
@@ -66,15 +66,15 @@ func NewSharedStore() *SharedStore {
 
 // Set set or update value in shared store
 func (s *SharedStore) Set(key string, entry *MEntry) error {
-	if s.itemSizeLimit > 0 && s.itemSizeLimit < entry.Size {
+	if s.itemSizeLimit > 0 && s.itemSizeLimit < int32(entry.Size) {
 		return fmt.Errorf("SERVER_ERROR object too large for cache")
 	}
 
 	entry.atime = time.Now().UnixMicro()
 
-	// if s.size.Load() > s.storeSizeLimit {
-	// 	s.unsafeEvictItem()
-	// }
+	if s.size.Load() > s.storeSizeLimit {
+		s.unsafeEvictItem()
+	}
 	s.casSrc.Add(1)
 	entry.Cas = s.casSrc.Load()
 	old, ok := s.coolmap.Set(key, entry)
@@ -113,28 +113,27 @@ func (s *SharedStore) Get(key string) (value *MEntry, ok bool) {
 }
 
 func (s *SharedStore) Delete(key string) {
-	old, ok := s.coolmap.Get(key)
-	if ok {
-		s.unsafeDelete(old.Key, old)
-	}
+	s.unsafeDelete(key)
 }
 
 func (s *SharedStore) Flush() {
 	s.flush = time.Now().UnixMicro()
 }
 
-func (s *SharedStore) SetMemoryLimit(limit uint64) {
+func (s *SharedStore) SetMemoryLimit(limit int64) {
 	s.storeSizeLimit = limit
 }
 
-func (s *SharedStore) SetItemSizeLimit(limit uint32) {
+func (s *SharedStore) SetItemSizeLimit(limit int32) {
 	s.itemSizeLimit = limit
 }
 
-func (s *SharedStore) unsafeDelete(k string, v *MEntry) {
-	s.count.Add(-1)
-	s.size.Add(-(int64(v.Size) + mEntrySize))
-	// delete(shard.h, k)
+func (s *SharedStore) unsafeDelete(k string) {
+	v, ok := s.coolmap.Delete(k)
+	if ok {
+		s.count.Add(-1)
+		s.size.Add(-(int64(v.Size) + mEntrySize))
+	}
 }
 
 func (s *SharedStore) tryExpireRandItem(flush int64) (expired bool) {
@@ -171,7 +170,7 @@ func (s *SharedStore) unsafeEvictItem() {
 	// 	batch_size--
 	// }
 
-	// s.unsafeDelete(oldest.Key, &oldest)
+	// s.unsafeDelete(oldest.Key)
 }
 
 func (s *SharedStore) LRUCrawler() {
