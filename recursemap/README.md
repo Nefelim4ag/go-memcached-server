@@ -44,9 +44,9 @@ goos: linux
 goarch: amd64
 pkg: nefelim4ag/go-memcached-server/recursemap
 cpu: Intel(R) Core(TM) i7-9750H CPU @ 2.60GHz
-BenchmarkCustomMapWithWrites-12    	   17192	    343816 ns/op	  442306 B/op	   18771 allocs/op
+BenchmarkCustomMapWithWrites-12            16438            120202 ns/op           10108 B/op        625 allocs/op
 PASS
-ok  	nefelim4ag/go-memcached-server/recursemap	6.226s
+ok      nefelim4ag/go-memcached-server/recursemap   2.927s
 
 # SyncMap N Readers, 1 Writer
 goos: linux
