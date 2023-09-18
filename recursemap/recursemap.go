@@ -1,6 +1,7 @@
 package recursemap
 
 import (
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"unsafe"
@@ -298,8 +299,6 @@ func (Node *petalNodeType[V]) filterList(h uint64, lvl uint, key string) (*V, bo
 	return old, ok
 }
 
-// ForEach is generator, not thread safe, will return key and value or nil, nil, may be
-// It's not perfect at all.
 func (Node *NodeType[V]) ForEach() (*string, *V){
 	if Node.iter == nil {
 		Node.iter = &iteratorState[V]{}
@@ -314,33 +313,64 @@ func (Node *NodeType[V]) ForEach() (*string, *V){
 		return &key, value
 	}
 
+    var fullLoops [16]int
+
 	dLvl := 0
 	cNode := Node
 	for dLvl = 0; dLvl < len(offset); dLvl++ {
-		nextNode := cNode.nodes[offset[dLvl]].Load()
-		wrap := false
-		for ; nextNode == nil && offset[dLvl] < 16 ; {
-			offset[dLvl]++
-			if offset[dLvl] >= len(cNode.nodes) {
-				offset[dLvl] = 0
-				if dLvl > 0 {
-					offset[dLvl-1] = (offset[dLvl-1] + 1) % len(cNode.nodes)
-					wrap = true
-					dLvl--
-				} else {
-					return nil, nil
-				}
-				break
+		if fullLoops[dLvl] > 0 {
+			return nil, nil // trap infinite loop
+		}
+
+		if dLvl == 0 {
+			fmt.Printf("lvl: %d, offset: %d\n", dLvl, offset[dLvl])
+		} else {
+			fmt.Printf("lvl: %d, offset: %d, parent offset: %d, fullLoops: %d\n", dLvl, offset[dLvl], offset[dLvl-1])
+		}
+
+		if cNode == nil {
+			if dLvl > 0 {
+				dLvl--
+				offset[dLvl] = (offset[dLvl] + 1)
+				if offset[dLvl] >= len(cNode.nodes) {
+					offset[dLvl] = 0
+					fullLoops[dLvl]++
+                }
+				continue
 			}
+		}
+
+		nextNode := cNode.nodes[offset[dLvl]].Load()
+		for ; nextNode == nil && offset[dLvl] < 16 ; {
 			nextNode = cNode.nodes[offset[dLvl]].Load()
+			offset[dLvl]++
         }
-		if wrap {
-			continue
+
+		if offset[dLvl] >= len(cNode.nodes) {
+			fullLoops[dLvl]++
+			offset[dLvl] = 0
+			if dLvl > 0 {
+				dLvl--
+				// Shift upper offset
+				offset[dLvl] = (offset[dLvl] + 1)
+				if offset[dLvl] >= len(cNode.nodes) {
+					offset[dLvl] = 0
+					fullLoops[dLvl]++
+                }
+				fmt.Printf("Wrap on lvl: %d, parent offset: %d, fullLoops: %d\n", dLvl, offset[dLvl], fullLoops[dLvl])
+				continue
+			} else {
+				return nil, nil
+			}
 		}
 
 		if cNode.container == petalNode {
 			pNode := (*petalNodeType[V])(unsafe.Pointer(cNode))
             list := pNode.entries[offset[dLvl]].Load()
+			if list == nil {
+				offset[dLvl] = (offset[dLvl] + 1) % 16
+                continue
+            }
 			*lastLN = list.next.Load()
 			offset[dLvl]++
 			if offset[dLvl] >= len(pNode.entries) {
