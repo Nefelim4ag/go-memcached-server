@@ -3,13 +3,12 @@ package memstore
 import (
 	"fmt"
 	"nefelim4ag/go-memcached-server/recursemap"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"log/slog"
-
-	"github.com/cespare/xxhash"
 )
 
 // Overhead size cost accounting for values
@@ -59,7 +58,7 @@ func NewSharedStore() *SharedStore {
 		coolmap: recursemap.NewRecurseMap[MEntry](),
 	}
 
-	// go S.LRUCrawler()
+	go S.LRUCrawler()
 
 	return &S
 }
@@ -101,10 +100,7 @@ func (s *SharedStore) Get(key string) (value *MEntry, ok bool) {
 		}
 
 		// Dirty hacky test of update items concurently =(
-		// fatal error: concurrent map read and map write
-		// updated := e
-		// updated.atime = time.Now().UnixMicro()
-		// shard.h[key] = updated
+		e.atime = time.Now().UnixMicro()
 		value := e
 		return value, ok
 	}
@@ -139,88 +135,57 @@ func (s *SharedStore) unsafeDelete(k string) {
 func (s *SharedStore) tryExpireRandItem(flush int64) (expired bool) {
 	deleted := false
 
-	// for k, v := range shard.h {
-	// 	if flush > v.atime {
-	// 		shard.unsafeDelete(k, &v)
-	// 		deleted = true
-	// 	}
-	// 	break
-	// }
+	k, v := s.coolmap.ForEach()
+	if k != nil {
+		if flush > v.atime {
+			s.unsafeDelete(*k)
+			deleted = true
+		}
+	}
 
 	return deleted
 }
 
 func (s *SharedStore) unsafeEvictItem() {
-	// if shard.count == 0 {
-	// 	shard.h = make(map[string]MEntry)
-	// 	return
-	// }
+	_, v := s.coolmap.ForEach()
+	oldest := *v
+	for i := 0; i < 1024; i++ {
+		_, v = s.coolmap.ForEach()
+		if v.atime < oldest.atime {
+			oldest = *v
+		}
+	}
 
-	// batch_size := 1024
-	// var oldest MEntry
-	// for _, v := range shard.h {
-	// 	if batch_size == 0 {
-	// 		break
-	// 	}
-
-	// 	if v.atime < oldest.atime {
-	// 		oldest = v
-	// 	}
-
-	// 	batch_size--
-	// }
-
-	// s.unsafeDelete(oldest.Key)
+	s.unsafeDelete(oldest.Key)
 }
 
 func (s *SharedStore) LRUCrawler() {
-	// last_flush := s.flush
+	last_flush := s.flush
 
-	// for {
-	// 	s.ctime = time.Now().Unix()
+	for {
+		s.ctime = time.Now().Unix()
 
-	// 	if last_flush < s.flush {
-	// 		for k, _ := range s.storeShards {
-	// 			shard := &s.storeShards[k]
-	// 			items_count := shard.count
-
-	// 			flush_expired := uint(0)
-	// 			for items_count > 0 {
-	// 				shard.Lock()
-	// 				batch_size := min(1024, max(1, items_count/1024))
-	// 				for i := uint64(0); i < batch_size; i++ {
-	// 					if shard.tryExpireRandItem(s.flush) {
-	// 						flush_expired++
-	// 					}
-	// 					items_count--
-	// 				}
-	// 				shard.Unlock()
-	// 			}
-
-<<<<<<< HEAD
-				slog.Info("memstore - flushed shard", "shard", k, slog.Uint64("time", uint64(flush_expired)))
+		if last_flush < s.flush {
+			flushExpired := 0
+			for i := 0; i < int(s.count.Load()); i++ {
+				if s.tryExpireRandItem(s.flush) {
+					flushExpired++
+				}
+				if i % 10000 == 0 {
+					slog.Info("memstore - flushed", "expired", flushExpired, "total", i)
+				}
 			}
+
+			slog.Info("memstore - flushed", "expired", flushExpired, "total", s.count.Load())
 			last_flush = s.flush
 			runtime.GC()
 		}
-=======
-	// 			log.Infof("Flushed from shard %d: %d\n", k, flush_expired)
-	// 		}
-	// 		last_flush = s.flush
-	// 		runtime.GC()
-	// 	}
->>>>>>> 6a73cbd (feat(server/newmap): It works1)
 
-	// 	for k, _ := range s.storeShards {
-	// 		shard := &s.storeShards[k]
-	// 		size_limit := atomic.LoadUint64(&s.size_limit)
-	// 		if size_limit > 0 && shard.size > size_limit/uint64(s.shardsCount) {
-	// 			shard.Lock()
-	// 			shard.unsafeEvictItem()
-	// 			shard.Unlock()
-	// 		}
-	// 	}
+		sizeLimit := s.storeSizeLimit
+		if sizeLimit > 0 && s.size.Load() > sizeLimit {
+			s.unsafeEvictItem()
+		}
 
-	// 	time.Sleep(time.Second)
-	// }
+		time.Sleep(time.Second)
+	}
 }

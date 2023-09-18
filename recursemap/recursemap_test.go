@@ -369,9 +369,7 @@ func TestMultiSet(t *testing.T) {
 		"21629",
 	}
 	m := NewRecurseMap[string]()
-	if v, ok := m.Get("notExist"); ok {
-		t.Fatal("Expected not found", v)
-	}
+
 	a := "value"
 	for _, v := range usefulStrings {
 		m.Set(v, &a)
@@ -387,6 +385,42 @@ func TestMultiSet(t *testing.T) {
 		}
 		count++
 		time.Sleep(time.Microsecond * 200)
+	}
+
+	for k := range newList {
+		if _, ok := m.Get(k); !ok {
+			fmt.Printf("Can't find %s\n", k)
+		}
+	}
+}
+
+func TestNotExist(t *testing.T) {
+	m := NewRecurseMap[string]()
+	if v, ok := m.Get("notExist"); ok {
+		t.Fatal("Expected not found", v)
+	}
+}
+
+func TestForEach(t *testing.T) {
+	usefulStrings := []string{}
+	for i := int64(0); i < 10000; i++ {
+		usefulStrings = append(usefulStrings, strconv.FormatInt(i, 10))
+	}
+
+	m := NewRecurseMap[string]()
+	a := "value"
+	for _, v := range usefulStrings {
+		m.Set(v, &a)
+	}
+
+	newList := make(map[string]*string, 0)
+	count := 0
+	for k, _ := m.ForEach(); count < len(usefulStrings); k, _ = m.ForEach() {
+		if k != nil {
+			newList[*k] = &a
+		}
+		count++
+		// time.Sleep(time.Microsecond * 200)
 	}
 
 	for k := range newList {
