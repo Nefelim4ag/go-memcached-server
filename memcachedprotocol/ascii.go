@@ -15,25 +15,25 @@ import (
 )
 
 func (ctx *Processor) sendEnd() error {
-	ctx.conn.Write([]byte("END\r\n"))
+	ctx.wb.Write([]byte("END\r\n"))
 
 	return nil
 }
 
 func (ctx *Processor) sendError() error {
-	ctx.conn.Write([]byte("ERROR\r\n"))
+	ctx.wb.Write([]byte("ERROR\r\n"))
 
 	return nil
 }
 
 func (ctx *Processor) sendClientError(msg string) error {
-	ctx.conn.Write([]byte(fmt.Sprintf("CLIENT_ERROR %s\r\n", msg)))
+	ctx.wb.Write([]byte(fmt.Sprintf("CLIENT_ERROR %s\r\n", msg)))
 
 	return fmt.Errorf("CLIENT_ERROR %s", msg)
 }
 
 func (ctx *Processor) sendServerError(msg string) error {
-	ctx.conn.Write([]byte(fmt.Sprintf("SERVER_ERROR %s\r\n", msg)))
+	ctx.wb.Write([]byte(fmt.Sprintf("SERVER_ERROR %s\r\n", msg)))
 
 	return fmt.Errorf("SERVER_ERROR %s", msg)
 }
@@ -56,7 +56,7 @@ func (ctx *Processor) CommandAscii() error {
 		return fmt.Errorf("quit")
 
 	case "version":
-		ctx.conn.Write([]byte("VERSION 1.6.2\r\n"))
+		ctx.wb.Write([]byte("VERSION 1.6.2\r\n"))
 		return nil
 
 	case "verbosity":
@@ -66,7 +66,7 @@ func (ctx *Processor) CommandAscii() error {
 			}
 			switch args[0] {
 			case "0", "1":
-				ctx.conn.Write([]byte("OK\r\n"))
+				ctx.wb.Write([]byte("OK\r\n"))
 				return nil
 			}
 		}
@@ -98,13 +98,13 @@ func (ctx *Processor) CommandAscii() error {
 			flags := binary.BigEndian.Uint32(_flags)
 			if command == "get" {
 				resp := fmt.Sprintf("VALUE %s %d %d\r\n", entry.Key, flags, entry.Size)
-				ctx.conn.Write([]byte(resp))
+				ctx.wb.Write([]byte(resp))
 			} else {
 				resp := fmt.Sprintf("VALUE %s %d %d %d\r\n", entry.Key, flags, entry.Size, entry.Cas)
-				ctx.conn.Write([]byte(resp))
+				ctx.wb.Write([]byte(resp))
 			}
-			ctx.conn.Write(entry.Value)
-			ctx.conn.Write([]byte("\r\n"))
+			ctx.wb.Write(entry.Value)
+			ctx.wb.Write([]byte("\r\n"))
 		}
 
 		return ctx.sendEnd()
@@ -116,12 +116,12 @@ func (ctx *Processor) CommandAscii() error {
 			key := args[0]
 			_, exist := ctx.store.Get(key)
 			if !exist {
-				ctx.conn.Write([]byte("NOT_FOUND\r\n"))
+				ctx.wb.Write([]byte("NOT_FOUND\r\n"))
 				return nil
 			}
 
 			ctx.store.Delete(key)
-			ctx.conn.Write([]byte("DELETED\r\n"))
+			ctx.wb.Write([]byte("DELETED\r\n"))
 		default:
 			if args[1] != "noreply" || len(args) > 2 {
 				ctx.sendError()
@@ -141,7 +141,7 @@ func (ctx *Processor) CommandAscii() error {
 		if len(args) > 0 && args[len(args)-1] == "noreply" {
 			return nil
 		}
-		ctx.conn.Write([]byte("OK\r\n"))
+		ctx.wb.Write([]byte("OK\r\n"))
 		return nil
 	case "stats":
 		return ctx.stats(args)
@@ -153,7 +153,7 @@ func (ctx *Processor) CommandAscii() error {
 	// err = HandleCommand(clientRequest, client)
 	// if err!= nil {
 	// 	// log.Println(clientRequest, err)
-	// 	ctx.conn.Write([]byte("ERROR\r\n"))
+	// 	ctx.wb.Write([]byte("ERROR\r\n"))
 	// 	return err
 	// }
 }
@@ -200,7 +200,7 @@ func (ctx *Processor) set_add_replace(command string, args []string) error {
 			if args[len(args)-1] == "noreply" {
 				return nil
 			}
-			ctx.conn.Write([]byte("NOT_STORED\r\n"))
+			ctx.wb.Write([]byte("NOT_STORED\r\n"))
 			return nil
 		}
 	case "replace":
@@ -208,7 +208,7 @@ func (ctx *Processor) set_add_replace(command string, args []string) error {
 			if args[len(args)-1] == "noreply" {
 				return nil
 			}
-			ctx.conn.Write([]byte("NOT_STORED\r\n"))
+			ctx.wb.Write([]byte("NOT_STORED\r\n"))
 			return nil
 		}
 	}
@@ -222,7 +222,7 @@ func (ctx *Processor) set_add_replace(command string, args []string) error {
 		return nil
 	}
 
-	ctx.conn.Write([]byte("STORED\r\n"))
+	ctx.wb.Write([]byte("STORED\r\n"))
 
 	return nil
 }
@@ -267,7 +267,7 @@ func (ctx *Processor) append_prepend(command string, args []string) error {
 		if args[len(args)-1] == "noreply" {
 			return nil
 		}
-		ctx.conn.Write([]byte("NOT_STORED\r\n"))
+		ctx.wb.Write([]byte("NOT_STORED\r\n"))
 		return nil
 	}
 
@@ -295,7 +295,7 @@ func (ctx *Processor) append_prepend(command string, args []string) error {
 		return nil
 	}
 
-	ctx.conn.Write([]byte("STORED\r\n"))
+	ctx.wb.Write([]byte("STORED\r\n"))
 
 	return nil
 }
@@ -350,7 +350,7 @@ func (ctx *Processor) cas(args []string) error {
 			return nil
 		}
 
-		ctx.conn.Write([]byte("NOT_FOUND\r\n"))
+		ctx.wb.Write([]byte("NOT_FOUND\r\n"))
 		return nil
 	}
 
@@ -359,7 +359,7 @@ func (ctx *Processor) cas(args []string) error {
 			return nil
 		}
 
-		ctx.conn.Write([]byte("EXISTS\r\n"))
+		ctx.wb.Write([]byte("EXISTS\r\n"))
 		return nil
 	}
 
@@ -372,7 +372,7 @@ func (ctx *Processor) cas(args []string) error {
 		return nil
 	}
 
-	ctx.conn.Write([]byte("STORED\r\n"))
+	ctx.wb.Write([]byte("STORED\r\n"))
 
 	return nil
 }
@@ -386,7 +386,7 @@ func (ctx *Processor) incr_decr(command string, args []string) error {
 
 	_v, exist := ctx.store.Get(key)
 	if !exist {
-		ctx.conn.Write([]byte("NOT_FOUND\r\n"))
+		ctx.wb.Write([]byte("NOT_FOUND\r\n"))
 		return nil
 	}
 
@@ -422,17 +422,17 @@ func (ctx *Processor) incr_decr(command string, args []string) error {
 		return nil
 	}
 
-	ctx.conn.Write([]byte(fmt.Sprintf("%d\r\n", new_value)))
+	ctx.wb.Write([]byte(fmt.Sprintf("%d\r\n", new_value)))
 
 	return nil
 }
 
 func (ctx *Processor) stats(args []string) error {
 	if len(args) == 0 {
-		ctx.conn.Write([]byte(fmt.Sprintf("STAT pid %d\r\n", os.Getpid())))
+		ctx.wb.Write([]byte(fmt.Sprintf("STAT pid %d\r\n", os.Getpid())))
 		// STAT uptime 6710
-		ctx.conn.Write([]byte(fmt.Sprintf("STAT time %d\r\n", time.Now().Unix())))
-		ctx.conn.Write([]byte("STAT version 1.6.19\r\n"))
+		ctx.wb.Write([]byte(fmt.Sprintf("STAT time %d\r\n", time.Now().Unix())))
+		ctx.wb.Write([]byte("STAT version 1.6.19\r\n"))
 		return ctx.sendError()
 	}
 
@@ -555,9 +555,9 @@ func (ctx *Processor) stats(args []string) error {
 // 		if ExpTime > 0 && exist {
 // 			v.ExpTime = uint32(ExpTime)
 // 			store.Set(key, v)
-// 			ctx.conn.Write([]byte("TOUCHED\r\n"))
+// 			ctx.wb.Write([]byte("TOUCHED\r\n"))
 // 		} else {
-// 			ctx.conn.Write([]byte("NOT_FOUND\r\n"))
+// 			ctx.wb.Write([]byte("NOT_FOUND\r\n"))
 // 		}
 
 // 	case "lru_crawler":
@@ -568,7 +568,7 @@ func (ctx *Processor) stats(args []string) error {
 // 				// key=fake%2Fee49a9a0d462d1fa%2F18a6af34196%3A18a6af34253%3Afa5766e2 exp=1694013261 la=1694012361 cas=12434 fetch=no cls=12 size=1139
 // 				// key=fake%2F886f3db85b3da0c2%2F18a6af60139%3A18a6af60c05%3A97e2dba9 exp=1694013435 la=1694012535 cas=12440 fetch=no cls=13 size=1420
 // 				// key=fake%2Fc437f5f7aa7cb20b%2F18a6b03682a%3A18a6b03be70%3A123ad4e4 exp=1694013435 la=1694012535 cas=12439 fetch=no cls=39 size=1918339
-// 				ctx.conn.Write([]byte("END\r\n"))
+// 				ctx.wb.Write([]byte("END\r\n"))
 // 			default:
 //                 return fmt.Errorf("not supported")
 // 			}

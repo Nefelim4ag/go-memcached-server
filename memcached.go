@@ -1,10 +1,8 @@
 package main
 
 import (
-	"bufio"
 	"flag"
 	"fmt"
-	"io"
 	"nefelim4ag/go-memcached-server/memcachedprotocol"
 	"nefelim4ag/go-memcached-server/memstore"
 	"nefelim4ag/go-memcached-server/tcpserver"
@@ -30,41 +28,10 @@ func (mS *memcachedServer) ConnectionHandler(conn *net.TCPConn, err error) {
 
 	defer conn.Close()
 
-	_r := bufio.NewReaderSize(conn, 64 * 1024)
-
 	// Reuse context between binary commands
-	Processor := memcachedprotocol.CreateProcessor(_r, conn, mS.store)
+	Processor := memcachedprotocol.CreateProcessor(conn, mS.store)
 	defer Processor.CloseProcessor()
-
-	// Waiting for the client request
-	for {
-		magic, err := _r.ReadByte()
-		_r.UnreadByte()
-		switch err {
-		case nil:
-		case io.EOF:
-			slog.Debug("Closed", "connection", conn.RemoteAddr())
-			return
-		default:
-			slog.Error(err.Error())
-			return
-		}
-
-		if magic < 0x80 {
-			err = Processor.CommandAscii()
-			if err != nil {
-				return
-			}
-		} else if magic == 0x80 {
-			err = Processor.CommandBinary()
-			if err != nil {
-				slog.Error(err.Error())
-				return
-			}
-		} else {
-			slog.Error("Unsupported protocol", "magic", fmt.Sprintf("%02x", magic), "client", conn.RemoteAddr())
-		}
-	}
+	Processor.Handle()
 }
 
 func main() {
