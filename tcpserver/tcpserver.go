@@ -10,7 +10,7 @@ import (
 )
 
 type (
-	ConnectionHandler func(conn *net.TCPConn, wg *sync.WaitGroup, err error)
+	ConnectionHandler func(conn *net.TCPConn, err error)
 
 	TCPServer interface {
 		ListenAndServe(address string, connectionQueue uint)
@@ -41,7 +41,15 @@ func (s *Server) ListenAndServe(address string, handler ConnectionHandler) error
 	s.handler = handler
 	s.shutdown = make(chan struct{})
 
+	go s.AcceptConnections()
+
 	return nil
+}
+
+func (s *Server) handlerWrap(conn *net.TCPConn, err error){
+	s.accepted.Add(1)
+	s.handler(conn, err)
+	s.accepted.Done()
 }
 
 func (s *Server) AcceptConnections() {
@@ -54,7 +62,7 @@ func (s *Server) AcceptConnections() {
 			return
 		default:
 			connection, err := s.listener.AcceptTCP()
-			go s.handler(connection, &s.accepted, err)
+			go s.handlerWrap(connection, err)
 		}
 	}
 }

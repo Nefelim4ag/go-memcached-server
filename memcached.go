@@ -13,30 +13,27 @@ import (
 	_ "net/http/pprof"
 	"os"
 	"os/signal"
-	"sync"
 	"syscall"
 
 	log "github.com/sirupsen/logrus"
 )
 
-var (
+type memcachedServer struct {
 	store *memstore.SharedStore
-)
+}
 
-func ConnectionHandler(conn *net.TCPConn, wg *sync.WaitGroup, err error) {
+func (mS *memcachedServer) ConnectionHandler(conn *net.TCPConn, err error) {
 	if err != nil {
 		log.Errorf(err.Error())
 		return
 	}
 
-	wg.Add(1)
-	defer wg.Done()
 	defer conn.Close()
 
 	_r := bufio.NewReaderSize(conn, 64 * 1024)
 
 	// Reuse context between binary commands
-	Processor := memcachedprotocol.CreateProcessor(_r, conn, store)
+	Processor := memcachedprotocol.CreateProcessor(_r, conn, mS.store)
 	defer Processor.CloseProcessor()
 
 	// Waiting for the client request
@@ -74,16 +71,16 @@ func main() {
     log.SetOutput(os.Stdout)
     log.SetLevel(log.DebugLevel)
 
-	_memstore_size := flag.Uint64("m", 512, "items memory in megabytes, default is 512")
-	_memstore_item_size := flag.Uint("I", 1024*1024, "max item sizem, default is 1m")
+	_memstoreSize := flag.Uint64("m", 512, "items memory in megabytes, default is 512")
+	_memstoreItemSize := flag.Uint("I", 1024*1024, "max item sizem, default is 1m")
 	logLevel := flag.Uint("loglevel", 3, "log level, 5=debug, 4=info, 3=warning, 2=error, 1=fatal, 0=panic")
 	pprof := flag.Bool("pprof", false, "enable pprof server")
 	flag.Parse()
 
 	log.SetLevel(log.Level(*logLevel))
 
-	memstore_size := uint64(*_memstore_size) * 1024 * 1024
-	memstore_item_size := uint32(*_memstore_item_size)
+	memstoreSize := uint64(*_memstoreSize) * 1024 * 1024
+	memstoreItemSize := uint32(*_memstoreItemSize)
 
 	// Wait for a SIGINT or SIGTERM signal to gracefully shut down the server
 	sigChan := make(chan os.Signal, 1)
@@ -94,20 +91,17 @@ func main() {
 			log.Error(http.ListenAndServe("127.0.0.1:6060", nil))
 		}()
 	}
-	store = memstore.NewSharedStore()
-	store.SetMemoryLimit(memstore_size)
-	store.SetItemSizeLimit(memstore_item_size)
+
+	memcachedSrv := &memcachedServer{
+		store: memstore.NewSharedStore(),
+	}
+	memcachedSrv.store.SetMemoryLimit(memstoreSize)
+	memcachedSrv.store.SetItemSizeLimit(memstoreItemSize)
 
 	srvInstance := tcpserver.Server{}
-	err := srvInstance.ListenAndServe(":11211", ConnectionHandler)
+	err := srvInstance.ListenAndServe(":11211", memcachedSrv.ConnectionHandler)
 	if err != nil {
 		log.Fatal(err)
-	}
-
-	acceptThreads := 2
-	for acceptThreads > 0 {
-		acceptThreads -= 1
-		go srvInstance.AcceptConnections()
 	}
 
 	<-sigChan
