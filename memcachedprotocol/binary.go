@@ -1,12 +1,10 @@
 package memcachedprotocol
 
 import (
-	"bufio"
 	"encoding/binary"
 	"fmt"
 	"io"
 	"nefelim4ag/go-memcached-server/memstore"
-	"net"
 	"unsafe"
 
 	log "github.com/sirupsen/logrus"
@@ -130,32 +128,7 @@ type ResponseHeader struct {
     cas       uint64
 }
 
-type BinaryProcessor struct {
-    store *memstore.SharedStore
-    rb    *bufio.Reader
-    conn  *net.TCPConn
-
-    raw_request  [24]byte
-    flags        [4]byte
-    exptime      [4]byte
-    request      RequestHeader
-    response     ResponseHeader
-    response_raw []byte
-    key          []byte
-}
-
-func CreateBinaryProcessor(rb *bufio.Reader, conn *net.TCPConn, store *memstore.SharedStore) *BinaryProcessor {
-    b := BinaryProcessor{
-        store:        store,
-        rb:           rb,
-        conn:         conn,
-        response_raw: make([]byte, 128),
-    }
-
-    return &b
-}
-
-func (ctx *BinaryProcessor) CommandBinary() error {
+func (ctx *Processor) CommandBinary() error {
     err := ctx.ReadRequest()
     if err != nil {
         return err
@@ -314,7 +287,7 @@ func (ctx *BinaryProcessor) CommandBinary() error {
     return fmt.Errorf("not implemented opcode: 0x%02x", ctx.request.opcode)
 }
 
-func (ctx *BinaryProcessor) ReadRequest() error {
+func (ctx *Processor) ReadRequest() error {
     raw_request := unsafe.Slice(&ctx.raw_request[0], len(ctx.raw_request))
     _, err := ctx.rb.Read(raw_request)
 
@@ -325,7 +298,7 @@ func (ctx *BinaryProcessor) ReadRequest() error {
     return nil
 }
 
-func (ctx *BinaryProcessor) Response(bytes ...[]byte) error {
+func (ctx *Processor) Response(bytes ...[]byte) error {
     ctx.PrepareResponse()
     sum := 24
     for _, arg := range bytes {
@@ -349,7 +322,7 @@ func (ctx *BinaryProcessor) Response(bytes ...[]byte) error {
     return nil
 }
 
-func (ctx *BinaryProcessor) DecodeRequestHeader() {
+func (ctx *Processor) DecodeRequestHeader() {
     ctx.request.magic = Magic(ctx.raw_request[0])
     ctx.request.opcode = OpcodeType(ctx.raw_request[1])
     ctx.request.keyLen = binary.BigEndian.Uint16(ctx.raw_request[2:4])
@@ -376,7 +349,7 @@ func (ctx *BinaryProcessor) DecodeRequestHeader() {
     }
 }
 
-func (ctx *BinaryProcessor) PrepareResponse() {
+func (ctx *Processor) PrepareResponse() {
     ctx.response_raw[0] = byte(ctx.response.magic)
     ctx.response_raw[1] = byte(ctx.response.opcode)
 

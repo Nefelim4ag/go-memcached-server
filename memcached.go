@@ -34,11 +34,10 @@ func ConnectionHandler(conn *net.TCPConn, wg *sync.WaitGroup, err error) {
 	defer conn.Close()
 
 	_r := bufio.NewReaderSize(conn, 64 * 1024)
-	_w := bufio.NewWriterSize(conn, 64 * 1024)
 
 	// Reuse context between binary commands
-	binaryProcessor := memcachedprotocol.CreateBinaryProcessor(_r, conn, store)
-	asciiProcessor := memcachedprotocol.CreateASCIIProcessor(_r, _w, store)
+	Processor := memcachedprotocol.CreateProcessor(_r, conn, store)
+	defer Processor.CloseProcessor()
 
 	// Waiting for the client request
 	for {
@@ -55,12 +54,12 @@ func ConnectionHandler(conn *net.TCPConn, wg *sync.WaitGroup, err error) {
 		}
 
 		if magic < 0x80 {
-			err = asciiProcessor.CommandAscii()
+			err = Processor.CommandAscii()
 			if err != nil {
 				return
 			}
 		} else if magic == 0x80 {
-			err = binaryProcessor.CommandBinary()
+			err = Processor.CommandBinary()
 			if err != nil {
 				log.Println(err)
 				return

@@ -1,7 +1,6 @@
 package memcachedprotocol
 
 import (
-	"bufio"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -15,172 +14,154 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-type ASCIIProcessor struct {
-    store *memstore.SharedStore
-    rb    *bufio.Reader
-    wb    *bufio.Writer
-}
-
-func CreateASCIIProcessor(rb *bufio.Reader, wb *bufio.Writer, store *memstore.SharedStore) *ASCIIProcessor {
-    return &ASCIIProcessor{
-        store:        store,
-        rb:           rb,
-        wb:           wb,
-    }
-}
-
-func (ctx *ASCIIProcessor) sendEnd() error {
-	ctx.wb.Write([]byte("END\r\n"))
+func (ctx *Processor) sendEnd() error {
+	ctx.conn.Write([]byte("END\r\n"))
 
 	return nil
 }
 
-func (ctx *ASCIIProcessor) sendError() error {
-	ctx.wb.Write([]byte("ERROR\r\n"))
+func (ctx *Processor) sendError() error {
+	ctx.conn.Write([]byte("ERROR\r\n"))
 
 	return nil
 }
 
-func (ctx *ASCIIProcessor) sendClientError(msg string) error {
-	ctx.wb.Write([]byte(fmt.Sprintf("CLIENT_ERROR %s\r\n", msg)))
+func (ctx *Processor) sendClientError(msg string) error {
+	ctx.conn.Write([]byte(fmt.Sprintf("CLIENT_ERROR %s\r\n", msg)))
 
 	return fmt.Errorf("CLIENT_ERROR %s", msg)
 }
 
-func (ctx *ASCIIProcessor) sendServerError(msg string) error {
-	ctx.wb.Write([]byte(fmt.Sprintf("SERVER_ERROR %s\r\n", msg)))
+func (ctx *Processor) sendServerError(msg string) error {
+	ctx.conn.Write([]byte(fmt.Sprintf("SERVER_ERROR %s\r\n", msg)))
 
 	return fmt.Errorf("SERVER_ERROR %s", msg)
 }
 
-func (ctx *ASCIIProcessor) CommandAscii() error {
-		request, err := ctx.rb.ReadString('\n')
-		if err != nil {
-            return err
-        }
+func (ctx *Processor) CommandAscii() error {
+	request, err := ctx.rb.ReadString('\n')
+	if err != nil {
+		return err
+	}
 
-		defer ctx.wb.Flush()
+	request = strings.TrimSpace(request)
+	request_parsed := strings.Split(request, " ")
+	command := request_parsed[0]
+	args := request_parsed[1:]
 
-		request = strings.TrimSpace(request)
-		request_parsed := strings.Split(request, " ")
-		command := request_parsed[0]
-		args := request_parsed[1:]
+	if log.GetLevel() == log.DebugLevel {
+		log.Debugf("cmd: %s %s", command, args)
+	}
 
-		if log.GetLevel() == log.DebugLevel {
-			log.Debugf("cmd: %s %s", command, args)
-		}
+	switch command {
+	case "quit":
+		return fmt.Errorf("quit")
 
-		switch command {
-		case "quit":
-			return fmt.Errorf("quit")
+	case "version":
+		ctx.conn.Write([]byte("VERSION 1.6.2\r\n"))
+		return nil
 
-		case "version":
-			ctx.wb.Write([]byte("VERSION 1.6.2\r\n"))
-			return nil
-
-		case "verbosity":
-			if len(args) > 0 {
-				if args[len(args) - 1] == "noreply" {
-					return nil
-				}
-				switch args[0] {
-				case "0", "1":
-					ctx.wb.Write([]byte("OK\r\n"))
-					return nil
-				}
-			}
-			return ctx.sendError()
-
-		case "set", "add", "replace":
-			return ctx.set_add_replace(command, args)
-
-		case "append", "prepend":
-			return ctx.append_prepend(command, args)
-
-		case "cas":
-			return ctx.cas(args)
-
-		case "get", "gets":
-			if len(args) == 0 {
-				return ctx.sendError()
-			}
-
-			for _, v := range args {
-				entry, exist := ctx.store.Get(v)
-				if !exist {
-					continue
-				}
-
-				// VALUE <key> <Flags> <bytes> [<cas unique>]\r\n
-				// <data block>\r\n
-				_flags := unsafe.Slice(&entry.Flags[0], len(entry.Flags))
-				flags := binary.BigEndian.Uint32(_flags)
-				if command == "get" {
-					resp := fmt.Sprintf("VALUE %s %d %d\r\n", entry.Key, flags, entry.Size)
-					ctx.wb.Write([]byte(resp))
-				} else {
-					resp := fmt.Sprintf("VALUE %s %d %d %d\r\n", entry.Key, flags, entry.Size, entry.Cas)
-					ctx.wb.Write([]byte(resp))
-				}
-				ctx.wb.Write(entry.Value)
-				ctx.wb.Write([]byte("\r\n"))
-			}
-
-			return ctx.sendEnd()
-		case "delete": //delete <key> [noreply]\r\n
-		    switch len(args) {
-			case 0:
-				return ctx.sendError()
-			case 1:
-				key := args[0]
-				_, exist := ctx.store.Get(key)
-				if !exist{
-					ctx.wb.Write([]byte("NOT_FOUND\r\n"))
-					return nil
-				}
-
-				ctx.store.Delete(key)
-				ctx.wb.Write([]byte("DELETED\r\n"))
-			default:
-				if args[1] != "noreply" || len(args) > 2 {
-                    ctx.sendError()
-                }
-				key := args[0]
-				ctx.store.Delete(key)
-			}
-
-			return nil
-
-		// incr|decr <key> <value> [noreply]\r\n
-		case "incr", "decr":
-			return ctx.incr_decr(command, args)
-
-		case "flush_all":
-			ctx.store.Flush()
-			if len(args) > 0 && args[len(args) - 1] == "noreply" {
+	case "verbosity":
+		if len(args) > 0 {
+			if args[len(args)-1] == "noreply" {
 				return nil
 			}
-			ctx.wb.Write([]byte("OK\r\n"))
-			return nil
-		case "stats":
-			return ctx.stats(args)
+			switch args[0] {
+			case "0", "1":
+				ctx.conn.Write([]byte("OK\r\n"))
+				return nil
+			}
+		}
+		return ctx.sendError()
 
-		default:
+	case "set", "add", "replace":
+		return ctx.set_add_replace(command, args)
+
+	case "append", "prepend":
+		return ctx.append_prepend(command, args)
+
+	case "cas":
+		return ctx.cas(args)
+
+	case "get", "gets":
+		if len(args) == 0 {
 			return ctx.sendError()
 		}
 
-		// err = HandleCommand(clientRequest, client)
-		// if err!= nil {
-		// 	// log.Println(clientRequest, err)
-		// 	ctx.wb.Write([]byte("ERROR\r\n"))
-		// 	return err
-		// }
+		for _, v := range args {
+			entry, exist := ctx.store.Get(v)
+			if !exist {
+				continue
+			}
+
+			// VALUE <key> <Flags> <bytes> [<cas unique>]\r\n
+			// <data block>\r\n
+			_flags := unsafe.Slice(&entry.Flags[0], len(entry.Flags))
+			flags := binary.BigEndian.Uint32(_flags)
+			if command == "get" {
+				resp := fmt.Sprintf("VALUE %s %d %d\r\n", entry.Key, flags, entry.Size)
+				ctx.conn.Write([]byte(resp))
+			} else {
+				resp := fmt.Sprintf("VALUE %s %d %d %d\r\n", entry.Key, flags, entry.Size, entry.Cas)
+				ctx.conn.Write([]byte(resp))
+			}
+			ctx.conn.Write(entry.Value)
+			ctx.conn.Write([]byte("\r\n"))
+		}
+
+		return ctx.sendEnd()
+	case "delete": //delete <key> [noreply]\r\n
+		switch len(args) {
+		case 0:
+			return ctx.sendError()
+		case 1:
+			key := args[0]
+			_, exist := ctx.store.Get(key)
+			if !exist {
+				ctx.conn.Write([]byte("NOT_FOUND\r\n"))
+				return nil
+			}
+
+			ctx.store.Delete(key)
+			ctx.conn.Write([]byte("DELETED\r\n"))
+		default:
+			if args[1] != "noreply" || len(args) > 2 {
+				ctx.sendError()
+			}
+			key := args[0]
+			ctx.store.Delete(key)
+		}
+
+		return nil
+
+	// incr|decr <key> <value> [noreply]\r\n
+	case "incr", "decr":
+		return ctx.incr_decr(command, args)
+
+	case "flush_all":
+		ctx.store.Flush()
+		if len(args) > 0 && args[len(args)-1] == "noreply" {
+			return nil
+		}
+		ctx.conn.Write([]byte("OK\r\n"))
+		return nil
+	case "stats":
+		return ctx.stats(args)
+
+	default:
+		return ctx.sendError()
+	}
+
+	// err = HandleCommand(clientRequest, client)
+	// if err!= nil {
+	// 	// log.Println(clientRequest, err)
+	// 	ctx.conn.Write([]byte("ERROR\r\n"))
+	// 	return err
+	// }
 }
 
-
-
 // <command name> <key> <Flags> <ExpTime> <bytes> [noreply]\r\n
-func (ctx *ASCIIProcessor) set_add_replace(command string, args []string) error {
+func (ctx *Processor) set_add_replace(command string, args []string) error {
 	key := args[0]
 	Flags, err := strconv.ParseUint(args[1], 10, 32)
 	if err != nil {
@@ -191,15 +172,15 @@ func (ctx *ASCIIProcessor) set_add_replace(command string, args []string) error 
 		return ctx.sendClientError(err.Error())
 	}
 	nbytes, err := strconv.ParseUint(args[3], 10, 32)
-	if err!= nil {
+	if err != nil {
 		return ctx.sendClientError(err.Error())
 	}
 
 	entry := memstore.MEntry{
-		Key: key,
+		Key:     key,
 		ExpTime: uint32(ExpTime),
-		Size: uint32(nbytes),
-		Value: make([]byte, nbytes),
+		Size:    uint32(nbytes),
+		Value:   make([]byte, nbytes),
 	}
 
 	_f := unsafe.Slice(&entry.Flags[0], len(entry.Flags))
@@ -216,40 +197,40 @@ func (ctx *ASCIIProcessor) set_add_replace(command string, args []string) error 
 
 	_, exist := ctx.store.Get(key)
 	switch command {
-		case "add":
-			if exist {
-				if args[len(args) - 1] == "noreply" {
-					return nil
-				}
-				ctx.wb.Write([]byte("NOT_STORED\r\n"))
+	case "add":
+		if exist {
+			if args[len(args)-1] == "noreply" {
 				return nil
 			}
-		case "replace":
-			if !exist {
-                if args[len(args) - 1] == "noreply" {
-                    return nil
-                }
-                ctx.wb.Write([]byte("NOT_STORED\r\n"))
-                return nil
-            }
-    }
+			ctx.conn.Write([]byte("NOT_STORED\r\n"))
+			return nil
+		}
+	case "replace":
+		if !exist {
+			if args[len(args)-1] == "noreply" {
+				return nil
+			}
+			ctx.conn.Write([]byte("NOT_STORED\r\n"))
+			return nil
+		}
+	}
 
 	err = ctx.store.Set(entry.Key, &entry)
-	if err!= nil {
+	if err != nil {
 		return ctx.sendClientError(err.Error())
 	}
 
-	if args[len(args) - 1] == "noreply" {
+	if args[len(args)-1] == "noreply" {
 		return nil
 	}
 
-	ctx.wb.Write([]byte("STORED\r\n"))
+	ctx.conn.Write([]byte("STORED\r\n"))
 
 	return nil
 }
 
 // <command name> <key> <Flags> <ExpTime> <bytes> [noreply]\r\n
-func (ctx *ASCIIProcessor) append_prepend(command string, args []string) error {
+func (ctx *Processor) append_prepend(command string, args []string) error {
 	key := args[0]
 	Flags, err := strconv.ParseUint(args[1], 10, 32)
 	if err != nil {
@@ -260,16 +241,16 @@ func (ctx *ASCIIProcessor) append_prepend(command string, args []string) error {
 		return ctx.sendClientError(err.Error())
 	}
 	nbytes, err := strconv.ParseUint(args[3], 10, 64)
-	if err!= nil {
+	if err != nil {
 		return ctx.sendClientError(err.Error())
 	}
 
 	entry := memstore.MEntry{
-		Key: key,
+		Key:     key,
 		ExpTime: uint32(ExpTime),
-		Size: uint32(nbytes),
-		Cas: uint64(time.Now().UnixNano()),
-		Value: make([]byte, nbytes),
+		Size:    uint32(nbytes),
+		Cas:     uint64(time.Now().UnixNano()),
+		Value:   make([]byte, nbytes),
 	}
 	_f := unsafe.Slice(&entry.Flags[0], len(entry.Flags))
 	binary.BigEndian.PutUint32(_f, uint32(Flags))
@@ -285,10 +266,10 @@ func (ctx *ASCIIProcessor) append_prepend(command string, args []string) error {
 
 	v, exist := ctx.store.Get(key)
 	if !exist {
-		if args[len(args) - 1] == "noreply" {
+		if args[len(args)-1] == "noreply" {
 			return nil
 		}
-		ctx.wb.Write([]byte("NOT_STORED\r\n"))
+		ctx.conn.Write([]byte("NOT_STORED\r\n"))
 		return nil
 	}
 
@@ -296,33 +277,33 @@ func (ctx *ASCIIProcessor) append_prepend(command string, args []string) error {
 	entry.ExpTime = v.ExpTime
 
 	switch command {
-		case "append":
-			old_data := v.Value
-			new_data := entry.Value
-			entry.Value = append(old_data, new_data[:]...)
-		case "prepend":
-			old_data := v.Value
-			new_data := entry.Value
-			entry.Value = append(new_data, old_data[:]...)
-    }
+	case "append":
+		old_data := v.Value
+		new_data := entry.Value
+		entry.Value = append(old_data, new_data[:]...)
+	case "prepend":
+		old_data := v.Value
+		new_data := entry.Value
+		entry.Value = append(new_data, old_data[:]...)
+	}
 	entry.Size = uint32(len(entry.Value))
 
 	err = ctx.store.Set(entry.Key, &entry)
-	if err!= nil {
+	if err != nil {
 		return ctx.sendClientError(err.Error())
 	}
 
-	if args[len(args) - 1] == "noreply" {
+	if args[len(args)-1] == "noreply" {
 		return nil
 	}
 
-	ctx.wb.Write([]byte("STORED\r\n"))
+	ctx.conn.Write([]byte("STORED\r\n"))
 
 	return nil
 }
 
 // cas <key> <Flags> <ExpTime> <bytes> <cas unique> [noreply]\r\n
-func (ctx *ASCIIProcessor) cas(args []string) error {
+func (ctx *Processor) cas(args []string) error {
 	if len(args) < 5 {
 		return ctx.sendClientError("not enough arguments for cas")
 	}
@@ -337,20 +318,20 @@ func (ctx *ASCIIProcessor) cas(args []string) error {
 		return ctx.sendClientError(err.Error())
 	}
 	bytes, err := strconv.ParseUint(args[3], 10, 32)
-	if err!= nil {
+	if err != nil {
 		return ctx.sendClientError(err.Error())
 	}
 	cas, err := strconv.ParseUint(args[4], 10, 64)
-	if err!= nil {
+	if err != nil {
 		return ctx.sendClientError(err.Error())
 	}
 
 	entry := memstore.MEntry{
-		Key: key,
+		Key:     key,
 		ExpTime: uint32(ExpTime),
-		Size: uint32(bytes),
-		Cas: uint64(time.Now().UnixNano()),
-		Value: make([]byte, bytes),
+		Size:    uint32(bytes),
+		Cas:     uint64(time.Now().UnixNano()),
+		Value:   make([]byte, bytes),
 	}
 	_f := unsafe.Slice(&entry.Flags[0], len(entry.Flags))
 	binary.BigEndian.PutUint32(_f, uint32(Flags))
@@ -367,53 +348,53 @@ func (ctx *ASCIIProcessor) cas(args []string) error {
 	// Racy implementation item can be modified between get & set
 	v, exist := ctx.store.Get(key)
 	if !exist {
-		if args[len(args) - 1] == "noreply" {
+		if args[len(args)-1] == "noreply" {
 			return nil
 		}
 
-		ctx.wb.Write([]byte("NOT_FOUND\r\n"))
+		ctx.conn.Write([]byte("NOT_FOUND\r\n"))
 		return nil
 	}
 
 	if v.Cas != cas {
-		if args[len(args) - 1] == "noreply" {
+		if args[len(args)-1] == "noreply" {
 			return nil
 		}
 
-		ctx.wb.Write([]byte("EXISTS\r\n"))
+		ctx.conn.Write([]byte("EXISTS\r\n"))
 		return nil
 	}
 
 	err = ctx.store.Set(entry.Key, &entry)
-	if err!= nil {
+	if err != nil {
 		return ctx.sendClientError(err.Error())
 	}
 
-	if args[len(args) - 1] == "noreply" {
+	if args[len(args)-1] == "noreply" {
 		return nil
 	}
 
-	ctx.wb.Write([]byte("STORED\r\n"))
+	ctx.conn.Write([]byte("STORED\r\n"))
 
 	return nil
 }
 
-func (ctx *ASCIIProcessor) incr_decr(command string, args []string) error {
+func (ctx *Processor) incr_decr(command string, args []string) error {
 	key := args[0]
 	change, err := strconv.ParseUint(args[1], 10, 64)
-	if err!= nil {
+	if err != nil {
 		return ctx.sendClientError(err.Error())
 	}
 
 	_v, exist := ctx.store.Get(key)
 	if !exist {
-		ctx.wb.Write([]byte("NOT_FOUND\r\n"))
+		ctx.conn.Write([]byte("NOT_FOUND\r\n"))
 		return nil
 	}
 
 	v := _v
 	old_value, err := strconv.ParseUint(string(v.Value), 10, 64)
-	if err!= nil {
+	if err != nil {
 		return ctx.sendClientError(err.Error())
 	}
 
@@ -422,13 +403,13 @@ func (ctx *ASCIIProcessor) incr_decr(command string, args []string) error {
 
 	new_value := uint64(0)
 	if command == "incr" {
-		if MaxUint - old_value < change {
+		if MaxUint-old_value < change {
 			new_value = MaxUint
 		} else {
 			new_value = old_value + change
 		}
 	} else {
-		if MinUint + old_value < change {
+		if MinUint+old_value < change {
 			new_value = MinUint
 		} else {
 			new_value = old_value - change
@@ -439,22 +420,22 @@ func (ctx *ASCIIProcessor) incr_decr(command string, args []string) error {
 	v.Size = uint32(len(v.Value))
 	ctx.store.Set(key, v)
 
-	if args[len(args) - 1] == "noreply" {
+	if args[len(args)-1] == "noreply" {
 		return nil
 	}
 
-	ctx.wb.Write([]byte(fmt.Sprintf("%d\r\n", new_value)))
+	ctx.conn.Write([]byte(fmt.Sprintf("%d\r\n", new_value)))
 
 	return nil
 }
 
-func (ctx *ASCIIProcessor) stats(args []string) error {
+func (ctx *Processor) stats(args []string) error {
 	if len(args) == 0 {
-		ctx.wb.Write([]byte(fmt.Sprintf("STAT pid %d\r\n", os.Getpid())))
+		ctx.conn.Write([]byte(fmt.Sprintf("STAT pid %d\r\n", os.Getpid())))
 		// STAT uptime 6710
-		ctx.wb.Write([]byte(fmt.Sprintf("STAT time %d\r\n", time.Now().Unix())))
-		ctx.wb.Write([]byte("STAT version 1.6.19\r\n"))
-        return ctx.sendError()
+		ctx.conn.Write([]byte(fmt.Sprintf("STAT time %d\r\n", time.Now().Unix())))
+		ctx.conn.Write([]byte("STAT version 1.6.19\r\n"))
+		return ctx.sendError()
 	}
 
 	switch args[0] {
@@ -576,9 +557,9 @@ func (ctx *ASCIIProcessor) stats(args []string) error {
 // 		if ExpTime > 0 && exist {
 // 			v.ExpTime = uint32(ExpTime)
 // 			store.Set(key, v)
-// 			ctx.wb.Write([]byte("TOUCHED\r\n"))
+// 			ctx.conn.Write([]byte("TOUCHED\r\n"))
 // 		} else {
-// 			ctx.wb.Write([]byte("NOT_FOUND\r\n"))
+// 			ctx.conn.Write([]byte("NOT_FOUND\r\n"))
 // 		}
 
 // 	case "lru_crawler":
@@ -589,7 +570,7 @@ func (ctx *ASCIIProcessor) stats(args []string) error {
 // 				// key=fake%2Fee49a9a0d462d1fa%2F18a6af34196%3A18a6af34253%3Afa5766e2 exp=1694013261 la=1694012361 cas=12434 fetch=no cls=12 size=1139
 // 				// key=fake%2F886f3db85b3da0c2%2F18a6af60139%3A18a6af60c05%3A97e2dba9 exp=1694013435 la=1694012535 cas=12440 fetch=no cls=13 size=1420
 // 				// key=fake%2Fc437f5f7aa7cb20b%2F18a6b03682a%3A18a6b03be70%3A123ad4e4 exp=1694013435 la=1694012535 cas=12439 fetch=no cls=39 size=1918339
-// 				ctx.wb.Write([]byte("END\r\n"))
+// 				ctx.conn.Write([]byte("END\r\n"))
 // 			default:
 //                 return fmt.Errorf("not supported")
 // 			}
