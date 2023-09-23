@@ -11,7 +11,7 @@ import (
 	"time"
 	"unsafe"
 
-	log "github.com/sirupsen/logrus"
+	"log/slog"
 )
 
 func (ctx *Processor) sendEnd() error {
@@ -49,9 +49,7 @@ func (ctx *Processor) CommandAscii() error {
 	command := request_parsed[0]
 	args := request_parsed[1:]
 
-	if log.GetLevel() == log.DebugLevel {
-		log.Debugf("cmd: %s %s", command, args)
-	}
+	slog.Debug("", "cmd", command, "args", args)
 
 	switch command {
 	case "quit":

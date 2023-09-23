@@ -15,7 +15,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	log "github.com/sirupsen/logrus"
+	"log/slog"
 )
 
 type memcachedServer struct {
@@ -24,7 +24,7 @@ type memcachedServer struct {
 
 func (mS *memcachedServer) ConnectionHandler(conn *net.TCPConn, err error) {
 	if err != nil {
-		log.Errorf(err.Error())
+		slog.Error(err.Error())
 		return
 	}
 
@@ -43,10 +43,10 @@ func (mS *memcachedServer) ConnectionHandler(conn *net.TCPConn, err error) {
 		switch err {
 		case nil:
 		case io.EOF:
-			log.Infof("client %s closed connection", conn.RemoteAddr())
+			slog.Debug("Closed", "connection", conn.RemoteAddr())
 			return
 		default:
-			log.Errorf("error: %v\n", err)
+			slog.Error(err.Error())
 			return
 		}
 
@@ -58,26 +58,43 @@ func (mS *memcachedServer) ConnectionHandler(conn *net.TCPConn, err error) {
 		} else if magic == 0x80 {
 			err = Processor.CommandBinary()
 			if err != nil {
-				log.Println(err)
+				slog.Error(err.Error())
 				return
 			}
 		} else {
-			log.Errorf("client %s aborted - unsupported protocol 0x%02x ~ %s", conn.RemoteAddr(), magic, string(magic))
+			slog.Error("Unsupported protocol", "magic", fmt.Sprintf("%02x", magic), "client", conn.RemoteAddr())
 		}
 	}
 }
 
 func main() {
-    log.SetOutput(os.Stdout)
-    log.SetLevel(log.DebugLevel)
-
 	_memstoreSize := flag.Uint64("m", 512, "items memory in megabytes, default is 512")
 	_memstoreItemSize := flag.Uint("I", 1024*1024, "max item sizem, default is 1m")
-	logLevel := flag.Uint("loglevel", 3, "log level, 5=debug, 4=info, 3=warning, 2=error, 1=fatal, 0=panic")
+	logLevel := flag.Int("loglevel", 3, "log level, 4=debug, 3=info, 2=warning, 1=error")
 	pprof := flag.Bool("pprof", false, "enable pprof server")
 	flag.Parse()
 
-	log.SetLevel(log.Level(*logLevel))
+	programLevel := new(slog.LevelVar)
+
+	switch *logLevel {
+	case 4:
+		programLevel.Set(slog.LevelDebug)
+		fmt.Println("Set debug")
+	case 3:
+		programLevel.Set(slog.LevelInfo)
+		fmt.Println("Set info")
+	case 2:
+		programLevel.Set(slog.LevelWarn)
+		fmt.Println("Set warn")
+	case 1:
+		programLevel.Set(slog.LevelError)
+		fmt.Println("Set error")
+	default:
+		panic("Unsupported log level")
+	}
+
+	logger := slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: programLevel})
+	slog.SetDefault(slog.New(logger))
 
 	memstoreSize := uint64(*_memstoreSize) * 1024 * 1024
 	memstoreItemSize := uint32(*_memstoreItemSize)
@@ -88,7 +105,7 @@ func main() {
 
 	if *pprof {
 		go func() {
-			log.Error(http.ListenAndServe("127.0.0.1:6060", nil))
+			slog.Error(http.ListenAndServe("127.0.0.1:6060", nil).Error())
 		}()
 	}
 
@@ -101,11 +118,11 @@ func main() {
 	srvInstance := tcpserver.Server{}
 	err := srvInstance.ListenAndServe(":11211", memcachedSrv.ConnectionHandler)
 	if err != nil {
-		log.Fatal(err)
+		slog.Error(err.Error())
 	}
 
 	<-sigChan
-	fmt.Println("Shutting down server...")
+	slog.Info("Shutting down server...")
 	srvInstance.Stop()
-	fmt.Println("Server stopped.")
+	slog.Info("Server stopped.")
 }

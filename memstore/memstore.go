@@ -7,8 +7,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	"log/slog"
+
 	"github.com/cespare/xxhash"
-	log "github.com/sirupsen/logrus"
 )
 
 // Overhead size cost accounting for values
@@ -234,7 +235,7 @@ func (s *SharedStore) LRUCrawler() {
 					shard.Unlock()
 				}
 
-				log.Infof("Flushed from shard %d: %d\n", k, flush_expired)
+				slog.Info("memstore - flushed shard", "shard", k, slog.Uint64("time", uint64(flush_expired)))
 			}
 			last_flush = s.flush
 			runtime.GC()

@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	log "github.com/sirupsen/logrus"
+	"log/slog"
 )
 
 type (
@@ -36,7 +36,7 @@ func (s *Server) ListenAndServe(address string, handler ConnectionHandler) error
 	if err != nil {
 		return fmt.Errorf("failed to listen on address %s: %w", address, err)
 	}
-	log.Infof("Listening on %s", address)
+	slog.Info("Listening", "address", address)
 
 	s.handler = handler
 	s.shutdown = make(chan struct{})
@@ -81,7 +81,7 @@ func (s *Server) Stop() error {
 	case <-done:
 		return nil
 	case <-time.After(2 * time.Second):
-		fmt.Println("Timed out waiting for connections to finish.")
+		slog.Warn("Timed out waiting for connections to finish.")
 		return nil
 	}
 }
