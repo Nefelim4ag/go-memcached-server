@@ -403,7 +403,7 @@ func TestNotExist(t *testing.T) {
 
 func TestForEach(t *testing.T) {
 	usefulStrings := []string{}
-	for i := int64(0); i < 10000; i++ {
+	for i := int64(0); i < 4869900 % 100000; i++ {
 		usefulStrings = append(usefulStrings, strconv.FormatInt(i, 10))
 	}
 
@@ -413,21 +413,38 @@ func TestForEach(t *testing.T) {
 		m.Set(v, &a)
 	}
 
+	for _, k := range usefulStrings {
+		if _, ok := m.Get(k); !ok {
+			t.Fatalf("Can't find %s\n", k)
+		}
+	}
+
 	newList := make(map[string]*string, 0)
 	count := 0
 	for k, _ := m.ForEach(); count < len(usefulStrings); k, _ = m.ForEach() {
 		if k != nil {
 			newList[*k] = &a
+			// fmt.Printf("key: %s\n", *k)
+		} else {
+			fmt.Println("Missing?")
 		}
 		count++
-		// time.Sleep(time.Microsecond * 200)
 	}
 
-	for k := range newList {
-		if _, ok := m.Get(k); !ok {
-			fmt.Printf("Can't find %s\n", k)
+	// 9999981 10000000
+	// PASS Almost working
+	fmt.Println(len(newList), len(usefulStrings))
+	if len(newList) != len(usefulStrings) {
+		for _, k := range usefulStrings {
+			_, ok := newList[k]
+			if !ok {
+				fmt.Printf("%s missing in ForEach\n", k)
+				m.GetDebug(k)
+			}
 		}
+		t.Fatalf("Size output %d < input %d", len(newList), len(usefulStrings))
 	}
+
 }
 
 func TestSetGet(t *testing.T) {

@@ -26,12 +26,12 @@ type (
 		writeLock sync.Mutex                      // Not used
 		nodes     [16]atomic.Pointer[NodeType[V]] // Stupid as shit! Shitty! Fast and furious!
 		// Iterator data
-		iter      *iteratorState[V]
+		iter *iteratorState[V]
 	}
 
 	iteratorState[V any] struct {
-		offset    [16]int
-		lastLN    *listNodeType[V]
+		vhash  uint64
+		lastLN *listNodeType[V]
 	}
 
 	// Will be direct converted ... on condition? Not sure
@@ -223,6 +223,7 @@ func (Node *NodeType[V]) rGet(key string, h uint64, lvl uint) (*V, bool) {
 
 func (Node *NodeType[V]) Get(key string) (*V, bool) {
 	h := xxh3.HashString(key)
+	// fmt.Printf("hash: 0x%016x, key: %s\n", h, key)
 	offset := getOffset(h, 0)
 	retNode := Node.nodes[offset].Load()
 	if retNode == nil {
@@ -299,11 +300,160 @@ func (Node *petalNodeType[V]) filterList(h uint64, lvl uint, key string) (*V, bo
 	return old, ok
 }
 
-func (Node *NodeType[V]) ForEach() (*string, *V){
+func incVHash(h uint64, lvl uint) uint64 {
+	//fmt.Printf("vhash: 0x%016x\n", h)
+	if h&0xffff000000000000 == 0xffff000000000000 {
+		fmt.Printf("vhash: 0x%016x -> ", h)
+	}
+	switch lvl {
+	case 0:
+		h = h & 0xf000000000000000
+		h = h + 0x1000000000000000
+	case 1:
+		h = h & 0xff00000000000000
+		h = h + 0x0100000000000000
+	case 2:
+		h = h & 0xfff0000000000000
+		h = h + 0x0010000000000000
+	case 3:
+		// oldh := h
+		h = h & 0xffff000000000000
+		h = h + 0x0001000000000000
+		// fmt.Printf("vhash: 0x%016x -> 0x%016x\n", oldh, h)
+	case 4:
+		h = h & 0xfffff00000000000
+		h = h + 0x0000100000000000
+	case 5:
+		h = h & 0xffffff0000000000
+		h = h + 0x0000010000000000
+	case 6:
+		h = h & 0xfffffff000000000
+		h = h + 0x0000001000000000
+	case 7:
+		h = h & 0xffffffff00000000
+		h = h + 0x0000000100000000
+	case 8:
+		h = h & 0xfffffffff0000000
+		h = h + 0x0000000010000000
+	case 9:
+		h = h & 0xffffffffff000000
+		h = h + 0x0000000001000000
+	case 10:
+		h = h & 0xfffffffffff00000
+		h = h + 0x0000000000100000
+	case 11:
+		h = h & 0xffffffffffff0000
+		h = h + 0x0000000000010000
+	case 12:
+		h = h & 0xfffffffffffff000
+		h = h + 0x0000000000001000
+	case 13:
+		h = h & 0xffffffffffffff00
+		h = h + 0x0000000000000100
+	case 14:
+		h = h & 0xfffffffffffffff0
+		h = h + 0x0000000000000010
+	case 15:
+		h = h + 1
+	default:
+		panic("Wrong lvl")
+	}
+
+	if h&0xffff000000000000 == 0xffff000000000000 {
+		fmt.Printf("0x%016x\n", h)
+	}
+
+	return h
+}
+
+func (Node *NodeType[V]) rForEach(vhash *uint64, lastLN **listNodeType[V], dLvl uint) (*string, *V) {
+	if dLvl == 15 {
+		panic("It is not supposed to go so deep! lvl 15 must be always petalNode")
+	}
+	offset := getOffset(*vhash, dLvl)
+	nextNode := Node.nodes[offset].Load()
+
+	// if nextNode != nil {
+	// 	fmt.Printf("vhash: 0x%016x, dlvl: %d\n", *vhash, dLvl)
+	// }
+	if *vhash&0xffff000000000000 == 0xffff000000000000 {
+		fmt.Printf("vhash: 0x%016x, dlvl: %d\n", *vhash, dLvl)
+	}
+	// Decrease recursion level manualy & stupid
+	for i := offset; i < 16 && nextNode == nil; i++ {
+		if *vhash&0xffff000000000000 == 0xffff000000000000 {
+			fmt.Printf("vhash: 0x%016x - skip, dlvl: %d\n", *vhash, dLvl)
+		}
+		// fmt.Printf("vhash: 0x%016x - skip, dlvl: %d\n", *vhash, dLvl)
+		*vhash = incVHash(*vhash, dLvl)
+		offset = getOffset(*vhash, dLvl)
+		nextNode = Node.nodes[offset].Load()
+	}
+
+	if nextNode == nil && offset == 15 {
+		if *vhash&0xffff000000000000 == 0xffff000000000000 {
+			fmt.Printf("vhash: 0x%016x - overload, dlvl: %d\n", *vhash, dLvl)
+		}
+		*vhash = incVHash(*vhash, dLvl)
+		if dLvl == 0 {
+			return nil, nil
+		}
+		return Node.rForEach(vhash, lastLN, dLvl-1)
+	}
+
+	if nextNode != nil {
+		if nextNode.container == petalNode {
+			pNode := (*petalNodeType[V])(unsafe.Pointer(nextNode))
+			*vhash = incVHash(*vhash, dLvl)
+
+			// Make copy of linked lists
+			// fmt.Printf("Make pNode %p copy, lvl: %d\n", pNode, dLvl)
+			for k := range pNode.entries {
+				lNode := pNode.entries[k].Load()
+				if lNode != nil {
+					// fmt.Printf("perEntry k: %d, %p copy, lvl: %d\n", k, lNode, dLvl)
+					newlNode := new(listNodeType[V])
+					newlNode.record.key = lNode.record.key
+					newlNode.record.value.Store(lNode.record.value.Load())
+
+					if *lastLN == nil {
+						*lastLN = newlNode
+					} else {
+						newlNode.next.Store(*lastLN)
+						*lastLN = newlNode
+					}
+					for ln := lNode.next.Load(); ln != nil; ln = ln.next.Load() {
+						// fmt.Printf("k: %d, perLNode %p copy, lvl: %d\n", k, ln, dLvl)
+						newlNode := new(listNodeType[V])
+						newlNode.record.key = ln.record.key
+						newlNode.record.value.Store(ln.record.value.Load())
+						newlNode.next.Store(*lastLN)
+						*lastLN = newlNode
+					}
+				}
+			}
+
+			if *lastLN != nil {
+				lNode := *lastLN
+				*lastLN = lNode.next.Load()
+				return &lNode.record.key, lNode.record.value.Load()
+			}
+
+			return Node.rForEach(vhash, lastLN, dLvl)
+		}
+
+		return nextNode.rForEach(vhash, lastLN, dLvl+1)
+	}
+
+	*vhash = incVHash(*vhash, dLvl)
+	return Node.rForEach(vhash, lastLN, dLvl)
+}
+
+func (Node *NodeType[V]) ForEach() (*string, *V) {
 	if Node.iter == nil {
 		Node.iter = &iteratorState[V]{}
 	}
-	offset := &Node.iter.offset
+	vhash := &Node.iter.vhash
 	lastLN := &Node.iter.lastLN
 
 	// Finish current tail
@@ -313,79 +463,52 @@ func (Node *NodeType[V]) ForEach() (*string, *V){
 		return &key, value
 	}
 
-    var fullLoops [16]int
+	return Node.rForEach(vhash, lastLN, 0)
+}
 
-	dLvl := 0
-	cNode := Node
-	for dLvl = 0; dLvl < len(offset); dLvl++ {
-		if fullLoops[dLvl] > 0 {
-			return nil, nil // trap infinite loop
+// Debug only
+func (Node *NodeType[V]) rGetDebug(key string, h uint64, lvl uint) (*V, bool) {
+	offset := getOffset(h, lvl)
+
+	if Node.container == petalNode {
+		pNode := (*petalNodeType[V])(unsafe.Pointer(Node))
+		list := pNode.entries[offset].Load()
+		fmt.Printf("pNode[%x] %p (l) -> ", offset, list)
+		if list == nil {
+			return nil, false
 		}
 
-		if dLvl == 0 {
-			fmt.Printf("lvl: %d, offset: %d\n", dLvl, offset[dLvl])
-		} else {
-			fmt.Printf("lvl: %d, offset: %d, parent offset: %d, fullLoops: %d\n", dLvl, offset[dLvl], offset[dLvl-1])
-		}
-
-		if cNode == nil {
-			if dLvl > 0 {
-				dLvl--
-				offset[dLvl] = (offset[dLvl] + 1)
-				if offset[dLvl] >= len(cNode.nodes) {
-					offset[dLvl] = 0
-					fullLoops[dLvl]++
-                }
-				continue
+		depth := 0
+		for ln := list; ln != nil; ln = ln.next.Load() {
+			fmt.Printf("lNode[%d] %p (l)", depth, ln)
+			if ln.record.key == key {
+				return ln.record.value.Load(), true
 			}
+			fmt.Printf(" -> ")
+			depth++
 		}
-
-		nextNode := cNode.nodes[offset[dLvl]].Load()
-		for ; nextNode == nil && offset[dLvl] < 16 ; {
-			nextNode = cNode.nodes[offset[dLvl]].Load()
-			offset[dLvl]++
-        }
-
-		if offset[dLvl] >= len(cNode.nodes) {
-			fullLoops[dLvl]++
-			offset[dLvl] = 0
-			if dLvl > 0 {
-				dLvl--
-				// Shift upper offset
-				offset[dLvl] = (offset[dLvl] + 1)
-				if offset[dLvl] >= len(cNode.nodes) {
-					offset[dLvl] = 0
-					fullLoops[dLvl]++
-                }
-				fmt.Printf("Wrap on lvl: %d, parent offset: %d, fullLoops: %d\n", dLvl, offset[dLvl], fullLoops[dLvl])
-				continue
-			} else {
-				return nil, nil
-			}
-		}
-
-		if cNode.container == petalNode {
-			pNode := (*petalNodeType[V])(unsafe.Pointer(cNode))
-            list := pNode.entries[offset[dLvl]].Load()
-			if list == nil {
-				offset[dLvl] = (offset[dLvl] + 1) % 16
-                continue
-            }
-			*lastLN = list.next.Load()
-			offset[dLvl]++
-			if offset[dLvl] >= len(pNode.entries) {
-				offset[dLvl] = 0
-				if dLvl > 0 {
-					offset[dLvl-1] = (offset[dLvl-1] + 1) % len(pNode.entries)
-				} else {
-					return nil, nil
-				}
-			}
-			return &list.record.key, list.record.value.Load()
-		}
-
-		cNode = cNode.nodes[offset[dLvl]].Load()
+		return nil, false
 	}
 
-	return nil, nil
+	retNode := Node.nodes[offset].Load()
+	if retNode == nil {
+		return nil, false
+	}
+
+	fmt.Printf("Node[%x] %p -> ", offset, retNode)
+	return retNode.rGetDebug(key, h, lvl+1)
+}
+
+func (Node *NodeType[V]) GetDebug(key string) (*V, bool) {
+	h := xxh3.HashString(key)
+	fmt.Printf("hash: 0x%016x, key: %s\n", h, key)
+	offset := getOffset(h, 0)
+	retNode := Node.nodes[offset].Load()
+	if retNode == nil {
+		return nil, false
+	}
+	fmt.Printf("Root[%x] %p -> ", offset, retNode)
+	v, ok := (*retNode).rGetDebug(key, h, 1)
+	fmt.Println()
+	return v, ok
 }
