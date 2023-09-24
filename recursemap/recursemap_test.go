@@ -403,7 +403,7 @@ func TestNotExist(t *testing.T) {
 
 func TestForEach(t *testing.T) {
 	usefulStrings := []string{}
-	for i := int64(0); i < 4869900 % 100000; i++ {
+	for i := int64(0); i < 5000000; i++ {
 		usefulStrings = append(usefulStrings, strconv.FormatInt(i, 10))
 	}
 
@@ -426,13 +426,13 @@ func TestForEach(t *testing.T) {
 			newList[*k] = &a
 			// fmt.Printf("key: %s\n", *k)
 		} else {
-			fmt.Println("Missing?")
+			// fmt.Println("Missing?")
 		}
 		count++
 	}
 
 	// 9999981 10000000
-	// PASS Almost working
+	// Almost working
 	fmt.Println(len(newList), len(usefulStrings))
 	if len(newList) != len(usefulStrings) {
 		for _, k := range usefulStrings {
@@ -440,9 +440,9 @@ func TestForEach(t *testing.T) {
 			if !ok {
 				fmt.Printf("%s missing in ForEach\n", k)
 				m.GetDebug(k)
+				t.Fatalf("Size output %d < input %d", len(newList), len(usefulStrings))
 			}
 		}
-		t.Fatalf("Size output %d < input %d", len(newList), len(usefulStrings))
 	}
 
 }
