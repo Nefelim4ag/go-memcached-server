@@ -1,8 +1,7 @@
 # go-memcached-server
 
-The Memcached server is written in Go for education goals a protocol-compatible implementation
-
-Base text protocol implemented
+The Memcached server is written in Go for educational purposes as a protocol-compatible implementation.
+Base text protocol has been implemented.
 ```
 memcapable -h 127.0.0.1 -p 11211 -a |& grep pass
 ascii version                           [pass]
