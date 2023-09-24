@@ -30,6 +30,7 @@ type (
 	}
 
 	iteratorState[V any] struct {
+		writeLock sync.Mutex
 		vhash  uint64
 		lastLN *listNodeType[V]
 	}
@@ -302,9 +303,9 @@ func (Node *petalNodeType[V]) filterList(h uint64, lvl uint, key string) (*V, bo
 
 func incVHash(h uint64, lvl uint) uint64 {
 	//fmt.Printf("vhash: 0x%016x\n", h)
-	if h&0xffff000000000000 == 0xffff000000000000 {
-		fmt.Printf("vhash: 0x%016x -> ", h)
-	}
+	// if h&0xffff000000000000 == 0xffff000000000000 {
+	// 	fmt.Printf("vhash: 0x%016x -> ", h)
+	// }
 	switch lvl {
 	case 0:
 		h = h & 0xf000000000000000
@@ -316,10 +317,8 @@ func incVHash(h uint64, lvl uint) uint64 {
 		h = h & 0xfff0000000000000
 		h = h + 0x0010000000000000
 	case 3:
-		// oldh := h
 		h = h & 0xffff000000000000
 		h = h + 0x0001000000000000
-		// fmt.Printf("vhash: 0x%016x -> 0x%016x\n", oldh, h)
 	case 4:
 		h = h & 0xfffff00000000000
 		h = h + 0x0000100000000000
@@ -359,94 +358,89 @@ func incVHash(h uint64, lvl uint) uint64 {
 		panic("Wrong lvl")
 	}
 
-	if h&0xffff000000000000 == 0xffff000000000000 {
-		fmt.Printf("0x%016x\n", h)
-	}
+	// if h&0xffff000000000000 == 0xffff000000000000 {
+	// 	fmt.Printf("0x%016x\n", h)
+	// }
 
 	return h
+}
+
+func (Node *petalNodeType[V]) rForEachList(lastLN **listNodeType[V]) (*string, *V) {
+	for k := range Node.entries {
+		lNode := Node.entries[k].Load()
+		if lNode == nil {
+			continue
+		}
+
+		newlNode := new(listNodeType[V])
+		newlNode.record.key = lNode.record.key
+		newlNode.record.value.Store(lNode.record.value.Load())
+
+		newlNode.next.Store(*lastLN)
+		*lastLN = newlNode
+
+		for ln := lNode.next.Load(); ln != nil; ln = ln.next.Load() {
+			// fmt.Printf("k: %d, perLNode %p copy, lvl: %d\n", k, ln, dLvl)
+			newlNode := new(listNodeType[V])
+			newlNode.record.key = ln.record.key
+			newlNode.record.value.Store(ln.record.value.Load())
+			newlNode.next.Store(*lastLN)
+			*lastLN = newlNode
+		}
+	}
+
+	if lastLN != nil {
+		lNode := *lastLN
+		*lastLN = lNode.next.Load()
+		return &lNode.record.key, lNode.record.value.Load()
+	}
+
+	fmt.Printf("Empty petal node %p\n", Node)
+	return nil, nil
 }
 
 func (Node *NodeType[V]) rForEach(vhash *uint64, lastLN **listNodeType[V], dLvl uint) (*string, *V) {
 	if dLvl == 15 {
 		panic("It is not supposed to go so deep! lvl 15 must be always petalNode")
 	}
-	offset := getOffset(*vhash, dLvl)
-	nextNode := Node.nodes[offset].Load()
+	if Node.container == petalNode {
+		panic("It is not supposed to go here")
+	}
+
+	// map is empty
+	allNil := true
+	for k := range Node.nodes {
+		if Node.nodes[k].Load() != nil {
+			allNil = false
+			break
+		}
+	}
+	if allNil {
+		*vhash = incVHash(*vhash, dLvl)
+		return nil, nil
+	}
 
 	// if nextNode != nil {
 	// 	fmt.Printf("vhash: 0x%016x, dlvl: %d\n", *vhash, dLvl)
 	// }
-	if *vhash&0xffff000000000000 == 0xffff000000000000 {
-		fmt.Printf("vhash: 0x%016x, dlvl: %d\n", *vhash, dLvl)
-	}
-	// Decrease recursion level manualy & stupid
+
+	offset := getOffset(*vhash, dLvl)
+	nextNode := Node.nodes[offset].Load()
+	// Decrease recursion level manualy
 	for i := offset; i < 16 && nextNode == nil; i++ {
-		if *vhash&0xffff000000000000 == 0xffff000000000000 {
-			fmt.Printf("vhash: 0x%016x - skip, dlvl: %d\n", *vhash, dLvl)
-		}
-		// fmt.Printf("vhash: 0x%016x - skip, dlvl: %d\n", *vhash, dLvl)
 		*vhash = incVHash(*vhash, dLvl)
 		offset = getOffset(*vhash, dLvl)
 		nextNode = Node.nodes[offset].Load()
 	}
 
-	if nextNode == nil && offset == 15 {
-		if *vhash&0xffff000000000000 == 0xffff000000000000 {
-			fmt.Printf("vhash: 0x%016x - overload, dlvl: %d\n", *vhash, dLvl)
-		}
-		*vhash = incVHash(*vhash, dLvl)
-		if dLvl == 0 {
-			return nil, nil
-		}
-		return Node.rForEach(vhash, lastLN, dLvl-1)
-	}
-
-	if nextNode != nil {
-		if nextNode.container == petalNode {
-			pNode := (*petalNodeType[V])(unsafe.Pointer(nextNode))
-			*vhash = incVHash(*vhash, dLvl)
-
-			// Make copy of linked lists
-			// fmt.Printf("Make pNode %p copy, lvl: %d\n", pNode, dLvl)
-			for k := range pNode.entries {
-				lNode := pNode.entries[k].Load()
-				if lNode != nil {
-					// fmt.Printf("perEntry k: %d, %p copy, lvl: %d\n", k, lNode, dLvl)
-					newlNode := new(listNodeType[V])
-					newlNode.record.key = lNode.record.key
-					newlNode.record.value.Store(lNode.record.value.Load())
-
-					if *lastLN == nil {
-						*lastLN = newlNode
-					} else {
-						newlNode.next.Store(*lastLN)
-						*lastLN = newlNode
-					}
-					for ln := lNode.next.Load(); ln != nil; ln = ln.next.Load() {
-						// fmt.Printf("k: %d, perLNode %p copy, lvl: %d\n", k, ln, dLvl)
-						newlNode := new(listNodeType[V])
-						newlNode.record.key = ln.record.key
-						newlNode.record.value.Store(ln.record.value.Load())
-						newlNode.next.Store(*lastLN)
-						*lastLN = newlNode
-					}
-				}
-			}
-
-			if *lastLN != nil {
-				lNode := *lastLN
-				*lastLN = lNode.next.Load()
-				return &lNode.record.key, lNode.record.value.Load()
-			}
-
-			return Node.rForEach(vhash, lastLN, dLvl)
-		}
-
+	if nextNode.container != petalNode {
 		return nextNode.rForEach(vhash, lastLN, dLvl+1)
 	}
 
+	pNode := (*petalNodeType[V])(unsafe.Pointer(nextNode))
+	k, v := pNode.rForEachList(lastLN)
 	*vhash = incVHash(*vhash, dLvl)
-	return Node.rForEach(vhash, lastLN, dLvl)
+	return k, v
 }
 
 func (Node *NodeType[V]) ForEach() (*string, *V) {
@@ -456,6 +450,8 @@ func (Node *NodeType[V]) ForEach() (*string, *V) {
 	vhash := &Node.iter.vhash
 	lastLN := &Node.iter.lastLN
 
+	Node.iter.writeLock.Lock()
+	defer Node.iter.writeLock.Unlock()
 	// Finish current tail
 	if *lastLN != nil {
 		key, value := (*lastLN).record.key, (*lastLN).record.value.Load()

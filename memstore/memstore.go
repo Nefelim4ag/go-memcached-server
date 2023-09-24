@@ -171,9 +171,6 @@ func (s *SharedStore) LRUCrawler() {
 				if s.tryExpireRandItem(s.flush) {
 					flushExpired++
 				}
-				if i % 10000 == 0 {
-					slog.Info("memstore - flushed", "expired", flushExpired, "total", i)
-				}
 			}
 
 			slog.Info("memstore - flushed", "expired", flushExpired, "total", s.count.Load())
