@@ -283,3 +283,22 @@ func TestSet(t *testing.T) {
 		}
 	}
 }
+
+func TestLargeSet(t *testing.T) {
+	usefulStrings := []string{}
+	for i := int64(0); i < 128000; i++ {
+		usefulStrings = append(usefulStrings, strconv.FormatInt(i, 10))
+	}
+
+	m := NewLinearMap[string]()
+	a := "value"
+	for _, v := range usefulStrings {
+		m.Set(v, &a)
+	}
+
+	for _, k := range usefulStrings {
+		if _, ok := m.Get(k); !ok {
+			t.Fatalf("Can't find %s\n", k)
+		}
+	}
+}
