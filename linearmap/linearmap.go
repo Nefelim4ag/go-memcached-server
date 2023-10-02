@@ -6,11 +6,16 @@ import (
 	"github.com/zeebo/xxh3"
 )
 
+const (
+	slots = 16
+)
+
 type (
 	LinearMap[V any] struct {
 		prefix        []mapBucket[V]
 		generationOld uint8
 		generation    uint8
+		notMigrated   int
 	}
 
 	mapBucket[V any] struct {
@@ -22,7 +27,7 @@ type (
 	mapNode[V any] struct {
 		bloom      uint64
 		emptySlots int
-		entries    [8]mapEntry[V]
+		entries    [slots]mapEntry[V]
 		next       *mapNode[V]
 	}
 
@@ -46,6 +51,12 @@ func log2(v int) int {
 	return 63 - bits.LeadingZeros64(uint64(v))
 }
 
+func bitMask(v int) uint64 {
+	var mask uint64
+	mask = uint64(1 << log2(v)) - 1
+	return mask
+}
+
 // Some bitwise magic with prefixes
 // Initial all values distributed between
 // 0 0b0 bucket
@@ -63,10 +74,10 @@ func log2(v int) int {
 
 func (LM *LinearMap[V]) Set(key string, value *V) {
 	h := xxh3.HashString(key)
-	prefix := h % uint64(len(LM.prefix))
+	prefix := h & bitMask(len(LM.prefix))
 
 	if LM.generationOld < LM.generation {
-		prefixOld := h % uint64(len(LM.prefix)/2)
+		prefixOld := h & bitMask(len(LM.prefix) >> 1)
 		bucketOld := &LM.prefix[prefixOld]
 		moved := 0
 		inplace := 0
@@ -76,36 +87,44 @@ func (LM *LinearMap[V]) Set(key string, value *V) {
 			bucketOld.minGeneration = LM.generation
 
 			for ; node != nil; node = node.next {
+				var newBloom uint64
 				for k := range node.entries {
 					if node.entries[k].filled {
-						p := node.entries[k].hash % uint64(len(LM.prefix))
+						p := node.entries[k].hash & bitMask(len(LM.prefix))
 						if p == prefixOld {
 							inplace++
+							newBloom = newBloom | node.entries[k].hash
 							continue
 						} else {
 							moved++
 							bucketOld.used--
 							LM.unsafeSet(node.entries[k].key, node.entries[k].hash, p, node.entries[k].value)
+							node.emptySlots++
 							node.entries[k].filled = false
 						}
 					}
 				}
+				node.bloom = newBloom
 			}
 			// fmt.Printf("Migrate bucket[%0x] moved=%d inplace=%d\n", prefixOld, moved, inplace)
-		}
 
-		newMinGen := LM.generation
-		for _, v := range LM.prefix {
-			if v.minGeneration < newMinGen {
-				// We have at least one not migrated bucket
-				newMinGen = v.minGeneration
-				break
+			LM.notMigrated--
+			if LM.notMigrated == 0 {
+				newMinGen := LM.generation
+				for k := 0; k < (len(LM.prefix) >> 1); k++ {
+					if LM.prefix[k].minGeneration < newMinGen {
+						// We have at least one not migrated bucket
+						newMinGen = LM.prefix[k].minGeneration
+						LM.notMigrated++
+						break
+					}
+				}
+
+				LM.generationOld = newMinGen
+				if LM.generationOld == LM.generation {
+					// fmt.Printf("Generation %d, migration completed\n", LM.generationOld)
+				}
 			}
-		}
-
-		LM.generationOld = newMinGen
-		if LM.generationOld == LM.generation {
-			// fmt.Printf("Generation %d, migration completed\n", LM.generationOld)
 		}
 	}
 
@@ -119,12 +138,12 @@ func (LM *LinearMap[V]) unsafeSet(key string, h uint64, prefix uint64, value *V)
 
 	if bucket.list == nil {
 		n := &mapNode[V]{
-			emptySlots: 16,
+			emptySlots: slots,
 		}
 		LM.prefix[prefix].list = n
-
 	}
 
+	var lastNode *mapNode[V]
 	var lastEmpty *mapEntry[V]
 	node := bucket.list
 	for ; node != nil; node = node.next {
@@ -147,6 +166,7 @@ func (LM *LinearMap[V]) unsafeSet(key string, h uint64, prefix uint64, value *V)
 			for k := range node.entries {
 				if lastEmpty == nil {
 					if !node.entries[k].filled {
+						lastNode = node
 						lastEmpty = &node.entries[k]
 					}
 				}
@@ -162,6 +182,7 @@ func (LM *LinearMap[V]) unsafeSet(key string, h uint64, prefix uint64, value *V)
 	}
 
 	if lastEmpty != nil {
+		lastNode.bloom = lastNode.bloom | h
 		lastEmpty.filled = true
 		lastEmpty.hash = h
 		lastEmpty.key = key
@@ -178,9 +199,9 @@ func (LM *LinearMap[V]) unsafeSet(key string, h uint64, prefix uint64, value *V)
 	}
 
 	n := &mapNode[V]{
-		emptySlots: 15,
 		bloom: h,
 	}
+	n.emptySlots = slots - 1
 	n.entries[0].filled = true
 	n.entries[0].hash = h
 	n.entries[0].key = key
@@ -193,6 +214,7 @@ func (LM *LinearMap[V]) unsafeSet(key string, h uint64, prefix uint64, value *V)
 
 	if bucket.used > 128 && LM.generationOld == LM.generation {
 		// Run ammortized generation grow
+		LM.notMigrated = len(LM.prefix)
 		LM.prefix = append(LM.prefix, make([]mapBucket[V], len(LM.prefix))...)
 		LM.generation++
 		for k := range LM.prefix {
@@ -206,11 +228,11 @@ func (LM *LinearMap[V]) unsafeSet(key string, h uint64, prefix uint64, value *V)
 
 func (LM *LinearMap[V]) Get(key string) (*V, bool) {
 	h := xxh3.HashString(key)
-	prefix := h % uint64(len(LM.prefix))
+	prefix := h & bitMask(len(LM.prefix))
 	bucket := &LM.prefix[prefix]
 
 	if LM.generationOld < LM.generation {
-		prefixOld := h % uint64(len(LM.prefix)/2)
+		prefixOld := h & bitMask(len(LM.prefix) >> 1)
 		bucketOld := &LM.prefix[prefixOld]
 		if bucketOld.minGeneration < LM.generation {
 			if prefixOld != prefix {
@@ -244,10 +266,10 @@ func (LM *LinearMap[V]) Get(key string) (*V, bool) {
 			continue
 		}
 		// Key can exists in Node
-		for k, v := range node.entries {
-			if v.hash == h {
+		for k := range node.entries {
+			if node.entries[k].hash == h {
 				if node.entries[k].key == key {
-					return v.value, true
+					return node.entries[k].value, true
 				}
 			}
 		}

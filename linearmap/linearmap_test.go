@@ -286,7 +286,7 @@ func TestSet(t *testing.T) {
 
 func TestLargeSet(t *testing.T) {
 	usefulStrings := []string{}
-	for i := int64(0); i < 128000; i++ {
+	for i := int64(0); i < 10000000; i++ {
 		usefulStrings = append(usefulStrings, strconv.FormatInt(i, 10))
 	}
 
