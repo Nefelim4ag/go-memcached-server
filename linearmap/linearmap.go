@@ -2,12 +2,15 @@ package linearmap
 
 import (
 	"math/bits"
+	"unsafe"
 
 	"github.com/zeebo/xxh3"
+	"golang.org/x/exp/slices"
 )
 
 const (
-	slots = 16
+	slots     = 16
+	bucketLen = 30
 )
 
 type (
@@ -25,19 +28,36 @@ type (
 	}
 
 	mapNode[V any] struct {
-		bloom      uint64
-		emptySlots int
-		entries    [slots]mapEntry[V]
-		next       *mapNode[V]
+		bloom uint64
+		// Must be ordered - filled first
+		nextEmpty int
+		entries   [slots]mapEntry[V]
+		next      *mapNode[V]
 	}
 
 	mapEntry[V any] struct {
-		hash   uint64
-		key    string
-		value  *V
-		filled bool
+		hash  uint64
+		key   string
+		value *V
 	}
 )
+
+func (n *mapNode[V]) bloomInsert(h uint64) {
+	n.bloom = n.bloom | (1 << (h % 64))
+}
+
+func (n *mapNode[V]) bloomReset() {
+	n.bloom = 0
+}
+
+func (n *mapNode[V]) bloomLookup(h uint64) bool {
+	found := n.bloom&(1<<(h%64)) != 0
+	return found
+}
+
+func (n *mapNode[V]) swap(i int, j int) {
+	n.entries[i], n.entries[j] = n.entries[j], n.entries[i]
+}
 
 // NewLinearMap create empty map
 func NewLinearMap[V any]() *LinearMap[V] {
@@ -53,8 +73,44 @@ func log2(v int) int {
 
 func bitMask(v int) uint64 {
 	var mask uint64
-	mask = uint64(1 << log2(v)) - 1
+	mask = uint64(1<<log2(v)) - 1
 	return mask
+}
+
+func (bucket *mapBucket[V]) merge(a *mapNode[V], b *mapNode[V]) {
+	if a == nil || b == nil {
+		return
+	}
+
+	// moved := 0
+	for b.nextEmpty > 0 && a.nextEmpty < slots {
+		b.nextEmpty--
+		hash := b.entries[b.nextEmpty].hash
+		a.entries[a.nextEmpty] = b.entries[b.nextEmpty]
+		a.bloomInsert(hash)
+		// moved++
+		for k := a.nextEmpty; k > 0; k-- {
+			if a.entries[k-1].hash > a.entries[k].hash {
+				a.swap(k-1, k)
+			}
+		}
+		a.nextEmpty++
+	}
+
+	// fmt.Printf("Merge moved: %d\n", moved)
+	b.bloomReset()
+	for k := 0; k < b.nextEmpty; k++ {
+		b.bloomInsert(b.entries[k].hash)
+	}
+
+	if b.next == nil {
+		if b.nextEmpty == 0 {
+			a.next = nil
+		}
+		return
+	}
+
+	bucket.merge(b, b.next)
 }
 
 // Some bitwise magic with prefixes
@@ -77,7 +133,7 @@ func (LM *LinearMap[V]) Set(key string, value *V) {
 	prefix := h & bitMask(len(LM.prefix))
 
 	if LM.generationOld < LM.generation {
-		prefixOld := h & bitMask(len(LM.prefix) >> 1)
+		prefixOld := h & bitMask(len(LM.prefix)>>1)
 		bucketOld := &LM.prefix[prefixOld]
 		moved := 0
 		inplace := 0
@@ -85,29 +141,30 @@ func (LM *LinearMap[V]) Set(key string, value *V) {
 			// Rebalance bucket
 			node := bucketOld.list
 			bucketOld.minGeneration = LM.generation
+			emptyEntry := mapEntry[V]{}
 
 			for ; node != nil; node = node.next {
-				var newBloom uint64
-				for k := range node.entries {
-					if node.entries[k].filled {
-						p := node.entries[k].hash & bitMask(len(LM.prefix))
-						if p == prefixOld {
-							inplace++
-							newBloom = newBloom | node.entries[k].hash
-							continue
-						} else {
-							moved++
-							bucketOld.used--
-							LM.unsafeSet(node.entries[k].key, node.entries[k].hash, p, node.entries[k].value)
-							node.emptySlots++
-							node.entries[k].filled = false
-						}
+				node.bloomReset()
+				for k := 0; k < node.nextEmpty; k++ {
+					p := node.entries[k].hash & bitMask(len(LM.prefix))
+					if p == prefixOld {
+						inplace++
+						node.bloomInsert(node.entries[k].hash)
+						continue
+					} else {
+						moved++
+						bucketOld.used--
+						LM.unsafeSet(node.entries[k].key, node.entries[k].hash, p, node.entries[k].value)
+						node.nextEmpty--
+						node.entries[k] = node.entries[node.nextEmpty]
+						node.entries[node.nextEmpty] = emptyEntry
+						k--
 					}
 				}
-				node.bloom = newBloom
 			}
 			// fmt.Printf("Migrate bucket[%0x] moved=%d inplace=%d\n", prefixOld, moved, inplace)
 
+			bucketOld.merge(bucketOld.list, bucketOld.list.next)
 			LM.notMigrated--
 			if LM.notMigrated == 0 {
 				newMinGen := LM.generation
@@ -133,26 +190,63 @@ func (LM *LinearMap[V]) Set(key string, value *V) {
 	return
 }
 
-func (LM *LinearMap[V]) unsafeSet(key string, h uint64, prefix uint64, value *V) {
-	bucket := &LM.prefix[prefix]
+func (n *mapNode[V]) unsafeUpdate(key string, h uint64, value *V) (*V, bool) {
+	e := mapEntry[V]{
+		hash: h,
+	}
 
-	if bucket.list == nil {
-		n := &mapNode[V]{
-			emptySlots: slots,
+	s := unsafe.Slice(&n.entries[0], n.nextEmpty)
+	i, ok := slices.BinarySearchFunc(s, e, func(a mapEntry[V], b mapEntry[V]) int {
+		if a.hash > b.hash {
+			return 1
 		}
+		if a.hash == b.hash {
+			return 0
+		}
+		return -1
+	})
+
+	if ok {
+		old := n.entries[i].value
+		n.entries[i].value = value
+		return old, true
+	}
+
+	return nil, false
+}
+
+func (LM *LinearMap[V]) unsafeSet(key string, h uint64, prefix uint64, value *V) {
+	if LM.prefix[prefix].list == nil {
+		n := &mapNode[V]{}
+		n.bloomInsert(h)
+		n.entries[0].hash = h
+		n.entries[0].key = key
+		n.entries[0].value = value
+		n.nextEmpty++
+		LM.prefix[prefix].used++
 		LM.prefix[prefix].list = n
 	}
 
-	var lastNode *mapNode[V]
-	var lastEmpty *mapEntry[V]
+	bucket := &LM.prefix[prefix]
 	node := bucket.list
 	for ; node != nil; node = node.next {
-		if node.bloom&h == 0 && node.emptySlots == 0 {
-			continue
+		if node.nextEmpty == slots {
+			if !node.bloomLookup(h) {
+				if node.next == nil {
+					// this is last node and it is full
+					break
+				}
+				continue
+			}
+
+			_, ok := node.unsafeUpdate(key, h, value)
+			if ok {
+				return
+			}
 		}
 
-		if node.bloom&h > 0 && node.emptySlots == 0 {
-			for k := range node.entries {
+		if node.bloomLookup(h) && node.nextEmpty < slots {
+			for k := 0; k < node.nextEmpty; k++ {
 				if node.entries[k].hash == h {
 					if node.entries[k].key == key {
 						node.entries[k].value = value
@@ -162,57 +256,46 @@ func (LM *LinearMap[V]) unsafeSet(key string, h uint64, prefix uint64, value *V)
 			}
 		}
 
-		if node.bloom&h > 0 && node.emptySlots > 0 {
-			for k := range node.entries {
-				if lastEmpty == nil {
-					if !node.entries[k].filled {
-						lastNode = node
-						lastEmpty = &node.entries[k]
+		if node.next == nil {
+			if node.nextEmpty < slots {
+				node.bloomInsert(h)
+				node.entries[node.nextEmpty].hash = h
+				node.entries[node.nextEmpty].key = key
+				node.entries[node.nextEmpty].value = value
+
+				// Sorting
+				for k := node.nextEmpty; k > 0; k-- {
+					if node.entries[k-1].hash > node.entries[k].hash {
+						node.swap(k-1, k)
 					}
 				}
 
-				if node.entries[k].hash == h {
-					if node.entries[k].key == key {
-						node.entries[k].value = value
-						return
-					}
-				}
+				node.nextEmpty++
+				bucket.used++
+
+				return
 			}
+			break
 		}
-	}
-
-	if lastEmpty != nil {
-		lastNode.bloom = lastNode.bloom | h
-		lastEmpty.filled = true
-		lastEmpty.hash = h
-		lastEmpty.key = key
-		lastEmpty.value = value
-
-		bucket.used++
-
-		return
 	}
 
 	// Unsuccessful finding hash in range -> add new, empty bucket
-	if node != nil {
+	if node.next != nil {
 		panic("Something goes wrong & tail is not nil")
 	}
 
-	n := &mapNode[V]{
-		bloom: h,
-	}
-	n.emptySlots = slots - 1
-	n.entries[0].filled = true
-	n.entries[0].hash = h
-	n.entries[0].key = key
-	n.entries[0].value = value
+	n := &mapNode[V]{}
 
-	n.next = bucket.list
-	bucket.list = n
-
+	n.bloomReset()
+	n.bloomInsert(h)
+	n.entries[n.nextEmpty].hash = h
+	n.entries[n.nextEmpty].key = key
+	n.entries[n.nextEmpty].value = value
+	n.nextEmpty++
 	bucket.used++
+	node.next = n
 
-	if bucket.used > 128 && LM.generationOld == LM.generation {
+	if bucket.used > bucketLen && LM.generationOld == LM.generation {
 		// Run ammortized generation grow
 		LM.notMigrated = len(LM.prefix)
 		LM.prefix = append(LM.prefix, make([]mapBucket[V], len(LM.prefix))...)
@@ -229,10 +312,9 @@ func (LM *LinearMap[V]) unsafeSet(key string, h uint64, prefix uint64, value *V)
 func (LM *LinearMap[V]) Get(key string) (*V, bool) {
 	h := xxh3.HashString(key)
 	prefix := h & bitMask(len(LM.prefix))
-	bucket := &LM.prefix[prefix]
 
 	if LM.generationOld < LM.generation {
-		prefixOld := h & bitMask(len(LM.prefix) >> 1)
+		prefixOld := h & bitMask(len(LM.prefix)>>1)
 		bucketOld := &LM.prefix[prefixOld]
 		if bucketOld.minGeneration < LM.generation {
 			if prefixOld != prefix {
@@ -241,11 +323,11 @@ func (LM *LinearMap[V]) Get(key string) (*V, bool) {
 				}
 				// search old bucket
 				for node := bucketOld.list; node != nil; node = node.next {
-					if node.bloom&h == 0 {
+					if !node.bloomLookup(h) {
 						continue
 					}
 					// Key can exists in Node
-					for k := range node.entries {
+					for k := 0; k < node.nextEmpty; k++ {
 						if node.entries[k].hash == h {
 							if node.entries[k].key == key {
 								return node.entries[k].value, true
@@ -257,16 +339,17 @@ func (LM *LinearMap[V]) Get(key string) (*V, bool) {
 		}
 	}
 
+	bucket := &LM.prefix[prefix]
 	if bucket.list == nil {
 		return nil, false
 	}
 
 	for node := bucket.list; node != nil; node = node.next {
-		if node.bloom&h == 0 {
+		if !node.bloomLookup(h) {
 			continue
 		}
 		// Key can exists in Node
-		for k := range node.entries {
+		for k := 0; k < node.nextEmpty; k++ {
 			if node.entries[k].hash == h {
 				if node.entries[k].key == key {
 					return node.entries[k].value, true

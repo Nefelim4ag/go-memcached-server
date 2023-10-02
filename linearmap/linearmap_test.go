@@ -52,9 +52,10 @@ func benchmarkRuntimeMap(b *testing.B, keys []string) {
 
 	b.ResetTimer()
 	var ok bool
+	v := "value"
 	for i := 0; i < b.N; i++ {
 		k := keys[i%n]
-		m[k] = k
+		m[k] = v
 		_, ok = m[k]
 	}
 	assert.True(b, ok)
@@ -87,9 +88,10 @@ func benchmarkCustomMap(b *testing.B, keys []string) {
 
 	b.ResetTimer()
 	var ok bool
+	v := "value"
 	for i := 0; i < b.N; i++ {
 		k := keys[i%n]
-		m.Set(k, &k)
+		m.Set(k, &v)
 		_, ok = m.Get(k)
 	}
 	assert.True(b, ok)
@@ -291,10 +293,16 @@ func TestLargeSet(t *testing.T) {
 	}
 
 	m := NewLinearMap[string]()
-	a := "value"
+	a := "value1"
+	rand.Shuffle(len(usefulStrings), func(i, j int) { usefulStrings[i], usefulStrings[j] = usefulStrings[j], usefulStrings[i] })
 	for _, v := range usefulStrings {
 		m.Set(v, &a)
 	}
+
+	// rand.Shuffle(len(usefulStrings), func(i, j int) { usefulStrings[i], usefulStrings[j] = usefulStrings[j], usefulStrings[i] })
+	// for _, v := range usefulStrings {
+	// 	m.Set(v, &a)
+	// }
 
 	for _, k := range usefulStrings {
 		if _, ok := m.Get(k); !ok {
